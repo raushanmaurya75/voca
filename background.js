@@ -1,11 +1,17 @@
-'use strict';
+// Enforce HTTPS for all requests
+function enforceHttps(url) {
+  if (!url.startsWith('https://')) {
+    throw new Error(`Security Error: Insecure URL detected: ${url}`);
+  }
+  return url;
+}
 
-// Cloudflare Worker endpoint (replace with your actual worker URL after deployment)
-const WORKER_URL = 'https://voca-backend.tivitji.workers.dev';
+// Cloudflare Worker endpoint
+const WORKER_URL = enforceHttps('https://voca-backend.tivitji.workers.dev');
 const REQUEST_TIMEOUT_MS = 30000;
 
 // Supabase config
-const SUPABASE_URL = 'https://ouwfkmjuckuoiwzwoopd.supabase.co';
+const SUPABASE_URL = enforceHttps('https://ouwfkmjuckuoiwzwoopd.supabase.co');
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im91d2ZrbWp1Y2t1b2l3endvb3BkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5MzE0MTAsImV4cCI6MjA5MTUwNzQxMH0.n-OPD8fl11kEbl_aD1QLMuvS4WmIHIiPOsk6DKMocsg';
 
 // Get user's Supabase auth token from storage, auto-refresh if needed

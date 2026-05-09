@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS usage_tracking (
   messagesUsed INTEGER DEFAULT 0,
   translationsUsed INTEGER DEFAULT 0,
   lastSyncCount INTEGER DEFAULT 0,
+  minute_count INTEGER DEFAULT 0,
+  last_minute INTEGER DEFAULT 0,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (userId, month)
 );

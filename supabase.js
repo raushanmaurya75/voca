@@ -4,6 +4,10 @@
 const SUPABASE_URL = 'https://ouwfkmjuckuoiwzwoopd.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im91d2ZrbWp1Y2t1b2l3endvb3BkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5MzE0MTAsImV4cCI6MjA5MTUwNzQxMH0.n-OPD8fl11kEbl_aD1QLMuvS4WmIHIiPOsk6DKMocsg';
 
+if (!SUPABASE_URL.startsWith('https://')) {
+  throw new Error('Security Error: Supabase URL must be HTTPS');
+}
+
 // Initialize Supabase client (available globally when using CDN)
 let supabaseClient = null;
 

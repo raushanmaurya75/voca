@@ -70,43 +70,68 @@ async function handleAIRequest(request: Request, env: Env, ctx: ExecutionContext
   const { mode, text, targetLang, tone, messages, streaming } = body;
   if (!mode) return jsonResponse({ error: 'Missing mode' }, 400);
 
-  // 1. Get/Initialize usage in D1 (Atomic Increment)
-  const isTranslation = mode === 'translate' || mode === 'auto-reply' || mode === 'pro-translate';
-  const usageField = isTranslation ? 'translationsUsed' : 'messagesUsed';
-
-  // Fetch current usage
+  // Fetch current usage (includes rate limiting info)
   let usage = await env.DB.prepare(
-    "SELECT messagesUsed, translationsUsed, lastSyncCount FROM usage_tracking WHERE userId = ? AND month = ?"
-  ).bind(userId, month).first<{ messagesUsed: number; translationsUsed: number; lastSyncCount: number }>();
+    "SELECT messagesUsed, translationsUsed, lastSyncCount, minute_count, last_minute FROM usage_tracking WHERE userId = ? AND month = ?"
+  ).bind(userId, month).first<{ messagesUsed: number; translationsUsed: number; lastSyncCount: number; minute_count: number; last_minute: number }>();
 
+  // 2. Initialize if not exists
   if (!usage) {
-    // Create new record for this month
     await env.DB.prepare(
-      "INSERT INTO usage_tracking (userId, month, messagesUsed, translationsUsed) VALUES (?, ?, 0, 0)"
-    ).bind(userId, month).run();
-    usage = { messagesUsed: 0, translationsUsed: 0, lastSyncCount: 0 };
+      "INSERT INTO usage_tracking (userId, month, messagesUsed, translationsUsed, minute_count, last_minute) VALUES (?, ?, 0, 0, 0, ?)"
+    ).bind(userId, month, Math.floor(Date.now() / 60000)).run();
+    usage = { messagesUsed: 0, translationsUsed: 0, lastSyncCount: 0, minute_count: 0, last_minute: Math.floor(Date.now() / 60000) };
   }
 
-  // Check quota
+  // 3. Input Validation (Before heavy processing)
+  if (mode === 'auto-reply') {
+    if (!Array.isArray(messages) || messages.length === 0) return jsonResponse({ error: 'Messages required for auto-reply' }, 400);
+    if (messages.length > 10) return jsonResponse({ error: 'Too many messages provided' }, 400);
+    for (const msg of messages) {
+      if (typeof msg.text !== 'string' || msg.text.length > 1000) return jsonResponse({ error: 'Message text too long or invalid' }, 400);
+      if (typeof msg.sender !== 'string') return jsonResponse({ error: 'Invalid sender format' }, 400);
+    }
+  } else {
+    if (typeof text !== 'string' || (text || '').length > 4000) return jsonResponse({ error: 'Text too long or invalid' }, 400);
+  }
+  if (tone && !ALLOWED_TONES.has(tone)) return jsonResponse({ error: 'Invalid tone' }, 400);
+
+  // 3. Quota Check
+  const isTranslation = mode === 'translate' || mode === 'auto-reply' || mode === 'pro-translate';
+  const usageField = isTranslation ? 'translationsUsed' : 'messagesUsed';
   const currentCount = isTranslation ? usage.translationsUsed : usage.messagesUsed;
   const limit = isTranslation ? planLimits.translations : planLimits.messages;
 
   if (currentCount >= limit) {
     return jsonResponse({
       error: `${plan} limit reached (${limit} ${isTranslation ? 'translations' : 'messages'}/month).`,
-      upgradeRequired: true,
-      plan,
-      limit,
-      used: currentCount,
+      upgradeRequired: true, plan, limit, used: currentCount,
     }, 403);
   }
 
-  // 2. Increment usage in D1 (Atomic)
+  // 4. Rate Limiting Check (D1-based, 30 req/min)
+  const currentMinute = Math.floor(Date.now() / 60000);
+  const isSameMinute = usage.last_minute === currentMinute;
+  const effectiveMinuteCount = isSameMinute ? usage.minute_count + 1 : 1;
+  
+  if (isSameMinute && usage.minute_count >= 30) {
+    return jsonResponse({ error: 'Rate limit exceeded. Please wait a minute.' }, 429);
+  }
+
+  // 5. Update usage in D1 (Atomic)
   ctx.waitUntil(
-    env.DB.prepare(`UPDATE usage_tracking SET ${usageField} = ${usageField} + 1, updated_at = CURRENT_TIMESTAMP WHERE userId = ? AND month = ?`)
-      .bind(userId, month)
+    env.DB.prepare(`
+      UPDATE usage_tracking 
+      SET ${usageField} = ${usageField} + 1, 
+          minute_count = ?, 
+          last_minute = ?,
+          updated_at = CURRENT_TIMESTAMP 
+      WHERE userId = ? AND month = ?
+    `)
+      .bind(effectiveMinuteCount, currentMinute, userId, month)
       .run()
   );
+
 
   // 3. Batch sync to Supabase if needed
   const newTotal = usage.messagesUsed + usage.translationsUsed + 1;
