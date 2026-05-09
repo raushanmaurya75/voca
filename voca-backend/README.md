@@ -33,6 +33,8 @@ npm install
 
 ### 2. Set Secrets (Encrypted)
 
+⚠️ **SECURITY WARNING**: Never commit these secrets to version control or expose them in client-side code!
+
 ```bash
 # Supabase: Dashboard → Project Settings → API → JWT Secret
 wrangler secret put SUPABASE_JWT_SECRET
@@ -42,6 +44,10 @@ wrangler secret put SUPABASE_URL
 
 # Supabase: Dashboard → Project Settings → API → anon/public key
 wrangler secret put SUPABASE_ANON_KEY
+
+# ⚠️ CRITICAL: Service Role Key has admin privileges - NEVER expose this to client!
+# Supabase: Dashboard → Project Settings → API → service_role key (under JWT Settings)
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 
 # Groq: https://console.groq.com/keys
 wrangler secret put GROQ_API_KEY
@@ -109,8 +115,9 @@ const WORKER_URL = 'https://voca-backend.YOUR_SUBDOMAIN.workers.dev';
 Set via `wrangler secret put`:
 - `GROQ_API_KEY` - From https://console.groq.com/keys
 - `SUPABASE_JWT_SECRET` - From Supabase Dashboard → Settings → API
-- `SUPABASE_URL` - `https://ouwfkmjuckuoiwzwoopd.supabase.co`
+- `SUPABASE_URL` - Your Supabase project URL
 - `SUPABASE_ANON_KEY` - Anon/public key from Supabase Dashboard
+- `SUPABASE_SERVICE_ROLE_KEY` - **⚠️ Service role key (admin access) - NEVER expose to client**
 
 ## Environment Variables
 
