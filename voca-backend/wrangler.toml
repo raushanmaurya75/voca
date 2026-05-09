@@ -1,0 +1,33 @@
+name = "voca-backend"
+main = "src/worker.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# KV Namespace binding for user usage tracking
+[[kv_namespaces]]
+binding = "USER_USAGE"
+id = "8569af352035477c8691836c9e7dcab5"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "voca-db"
+database_id = "99f24245-98ca-4ac4-9384-d3e9862777a6"
+
+# Secrets (set via wrangler secret put):
+# wrangler secret put GROQ_API_KEY
+# wrangler secret put SUPABASE_JWT_SECRET  
+# wrangler secret put SUPABASE_URL
+# wrangler secret put SUPABASE_ANON_KEY
+
+[vars]
+# Three-tier plan limits (messages, translations)
+# Free: 200 messages + 80 translations
+# Pro: 2300 messages + 1500 translations  
+# Premium: 5000 messages + 4000 translations
+
+# Batch sync every 20 messages to Supabase (keeps costs at 0)
+BATCH_SYNC_THRESHOLD = "20"
+
+# Groq API settings
+GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.1-8b-instant"

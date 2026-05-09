@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Voca</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            width: 320px;
+            background-color: #121212;
+            color: #e5e2e1;
+            font-family: 'Inter', sans-serif;
+            overflow-x: hidden;
+            min-height: 480px;
+        }
+
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+
+        /* ── Header ── */
+        header {
+            background: rgba(18, 18, 18, 0.95);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 56px;
+            padding: 0 16px;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+        }
+        .header-left { display: flex; align-items: center; gap: 8px; }
+        .header-left img { width: 28px; height: 28px; border-radius: 8px; object-fit: cover; }
+        .header-left span { font-size: 18px; font-weight: 700; color: #fff; letter-spacing: -0.05em; }
+        .version-badge {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+            font-weight: 700; color: rgba(255, 255, 255, 0.4);
+            background: rgba(255, 255, 255, 0.05);
+            padding: 2px 8px; border-radius: 9999px;
+        }
+
+        /* ── Main Layout ── */
+        main { padding: 16px; display: flex; flex-direction: column; gap:16px; }
+
+        .glass-panel {
+            background: rgba(30, 30, 30, 0.6);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 16px;
+        }
+
+        /* ── Status Area ── */
+        .status {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px; border-radius: 12px;
+        }
+        .status-left { display: flex; align-items: center; gap: 12px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; }
+        #status-text { font-size: 12px; font-weight: 500; color: #fff; }
+        .status-label { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; color: rgba(255, 255, 255, 0.3); text-transform: uppercase; }
+
+        .status.ready  .dot { background: #007AFF; box-shadow: 0 0 8px 2px rgba(0, 122, 255, 0.4); }
+        .status.off    .dot { background: #cbd5e0; box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.2); }
+        .status.no-key .dot { background: #f6ad55; box-shadow: 0 0 8px 2px rgba(246, 173, 85, 0.4); animation: pulse 1.4s ease-in-out infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+        /* ── Settings Controls ── */
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .section-label { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; color: #9ca3af; text-transform: uppercase; }
+        
+        /* Select */
+        .select-wrapper { position: relative; display: flex; flex-direction: column; gap: 8px; }
+        select {
+            width: 100%; appearance: none; background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px;
+            padding: 8px 36px 8px 12px; color: #fff; font-size: 14px; outline: none;
+            transition: all 0.2s; cursor: pointer;
+        }
+        select:focus { border-color: #007AFF; }
+        select option { background: #1a1a1a; color: #fff; }
+        .select-icon {
+            position: absolute; right: 12px; bottom: 8px;
+            color: rgba(255, 255, 255, 0.4); pointer-events: none; font-size: 20px;
+        }
+
+        .footer { text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.3); margin-top: 8px; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="header-left">
+        <img alt="Voca" src="logo.png"/>
+        <span>Voca</span>
+    </div>
+    <span class="version-badge">v1.0.0</span>
+</header>
+
+<main>
+    <!-- Status Area -->
+    <div class="status off glass-panel" id="status">
+        <div class="status-left">
+            <div class="dot"></div>
+            <span id="status-text">Please sign in to use Voca</span>
+        </div>
+        <span class="status-label">System Status</span>
+        <span id="plan-badge" style="font-size: 10px; font-weight: 700; color: #9ca3af; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 9999px; margin-left: 8px;">FREE</span>
+    </div>
+
+    <!-- Settings Section -->
+    <section class="glass-panel">
+        
+        <!-- Language Selector -->
+        <div class="select-wrapper">
+            <label class="section-label" for="speaking-lang">Your Speaking Language</label>
+            <select id="speaking-lang">
+                <option value="English">English</option>
+                <option value="Spanish">Spanish</option>
+                <option value="French">French</option>
+                <option value="German">German</option>
+                <option value="Italian">Italian</option>
+                <option value="Portuguese">Portuguese</option>
+                <option value="Hindi">Hindi</option>
+                <option value="Thai">Thai</option>
+                <option value="Chinese">Chinese</option>
+                <option value="Japanese">Japanese</option>
+                <option value="Korean">Korean</option>
+                <option value="Arabic">Arabic</option>
+                <option value="Russian">Russian</option>
+            </select>
+            <span class="material-symbols-outlined select-icon">expand_more</span>
+        </div>
+    </section>
+
+        <!-- Plan & Quota Display -->
+        <div style="margin-bottom: 16px;">
+            <!-- Plan Info -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px;">
+                <div>
+                    <div style="font-size: 11px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em;">Current Plan</div>
+                    <div id="current-plan" style="font-size: 16px; font-weight: 700; color: #fff; margin-top: 2px;">FREE</div>
+                </div>
+                <div style="text-align: right;">
+                    <div id="remaining-days" style="font-size: 11px; color: #9ca3af;">30 days left</div>
+                </div>
+            </div>
+            
+            <!-- Usage Stats -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <!-- Messages -->
+                <div style="background: rgba(96, 165, 250, 0.1); border: 1px solid rgba(96, 165, 250, 0.2); border-radius: 8px; padding: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="color: #9ca3af; font-size: 12px; font-weight: 600;">Messages</span>
+                        <span id="messages-usage" style="color: #fff; font-size: 14px; font-weight: 700;">0 / 200</span>
+                    </div>
+                    <div style="height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                        <div id="messages-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #60a5fa, #3b82f6); transition: width 0.3s; border-radius: 3px;"></div>
+                    </div>
+                </div>
+                <!-- Translations -->
+                <div style="background: rgba(167, 139, 250, 0.1); border: 1px solid rgba(167, 139, 250, 0.2); border-radius: 8px; padding: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="color: #9ca3af; font-size: 12px; font-weight: 600;">Translations</span>
+                        <span id="translations-usage" style="color: #fff; font-size: 14px; font-weight: 700;">0 / 80</span>
+                    </div>
+                    <div style="height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                        <div id="translations-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #a78bfa, #7c3aed); transition: width 0.3s; border-radius: 3px;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button id="btn-upgrade" style="
+            width: 100%;
+            padding: 8px;
+            background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 12px;
+        ">Upgrade Plan</button>
+    </section>
+
+    <div class="footer">
+        <div id="user-info" style="display: none; align-items: center; justify-content: center; gap: 8px; margin-bottom: 8px;">
+            <span id="user-email" style="color: #9ca3af; font-size: 12px;"></span>
+            <button id="btn-logout" style="background: rgba(255,255,255,0.1); border: none; border-radius: 4px; padding: 4px 8px; color: #9ca3af; font-size: 11px; cursor: pointer;">Logout</button>
+        </div>
+        <div>Talk Globally Professionally</div>
+    </div>
+</main>
+
+<script src="popup.js"></script>
+</body>
+</html>
