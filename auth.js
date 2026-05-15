@@ -150,7 +150,7 @@ async function handleOAuthCallback() {
                 email: user.email,
                 access_token: accessToken,
                 refresh_token: refreshToken,
-                expires_at: Date.now() + (expiresIn * 1000)
+                expires_at: Date.now() + (parseInt(expiresIn || '3600', 10) * 1000)
             };
             await chrome.storage.local.set({ vocaUser });
 

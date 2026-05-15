@@ -16,11 +16,39 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 // Get user's Supabase auth token from storage, auto-refresh if needed
 async function getAuthToken() {
+  console.log('[Voca] getAuthToken called');
   let { vocaUser } = await chrome.storage.local.get('vocaUser');
-  if (!vocaUser || !vocaUser.access_token) return null;
 
-  // Refresh if within 5 minutes of expiry
-  if (vocaUser.expires_at && Date.now() >= (vocaUser.expires_at - 300000)) {
+  if (!vocaUser) {
+    console.warn('[Voca] getAuthToken: No vocaUser found in storage.local');
+    return null;
+  }
+  if (!vocaUser.access_token) {
+    console.warn('[Voca] getAuthToken: vocaUser found but access_token is missing. User state:', vocaUser);
+    return null;
+  }
+
+  const now = Date.now();
+  const expiry = vocaUser.expires_at || 0;
+  const needsRefresh = now >= (expiry - 300000); // 5 minutes buffer
+
+  console.log('[Voca] Auth state:', {
+    email: vocaUser.email,
+    hasAccessToken: !!vocaUser.access_token,
+    hasRefreshToken: !!vocaUser.refresh_token,
+    expiresAt: new Date(expiry).toISOString(),
+    now: new Date(now).toISOString(),
+    needsRefresh
+  });
+
+  if (needsRefresh) {
+    if (!vocaUser.refresh_token) {
+      console.warn('[Voca] Token expired and no refresh_token available');
+      await chrome.storage.local.remove('vocaUser');
+      return null;
+    }
+
+    console.log('[Voca] Attempting to refresh token...');
     try {
       const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
         method: 'POST',
@@ -30,23 +58,42 @@ async function getAuthToken() {
         },
         body: JSON.stringify({ refresh_token: vocaUser.refresh_token })
       });
-      const data = await response.json();
-      
-      if (!data.error && data.access_token) {
+
+      const contentType = response.headers.get('content-type') || '';
+      let data;
+      if (contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.error('[Voca] Supabase refresh returned non-JSON:', text.substring(0, 500));
+        return null;
+      }
+
+      if (response.ok && data.access_token) {
+        console.log('[Voca] Token refreshed successfully');
         vocaUser = {
           ...vocaUser,
           access_token: data.access_token,
-          refresh_token: data.refresh_token,
-          expires_at: Date.now() + (data.expires_in * 1000)
+          refresh_token: data.refresh_token || vocaUser.refresh_token,
+          expires_at: Date.now() + ((data.expires_in || 3600) * 1000)
         };
         await chrome.storage.local.set({ vocaUser });
       } else {
-        await chrome.storage.local.remove('vocaUser');
+        console.error('[Voca] Token refresh failed with error:', data);
+        // Only clear user if the refresh token itself is invalid
+        if (data.error === 'invalid_grant' || data.message?.includes('refresh_token')) {
+          console.warn('[Voca] Refresh token invalid, signing out');
+          await chrome.storage.local.remove('vocaUser');
+        }
         return null;
       }
     } catch (e) {
-      console.error('[Voca] Token refresh failed:', e);
-      // Don't remove user on network failure, just return null for now
+      console.error('[Voca] Token refresh network error:', e);
+      // Return existing token if not yet fully expired, otherwise null
+      if (now < expiry) {
+        console.log('[Voca] Using existing token despite refresh failure (not yet fully expired)');
+        return vocaUser.access_token;
+      }
       return null;
     }
   }
@@ -58,8 +105,10 @@ async function getAuthToken() {
 async function callVocaAI(payload) {
   const token = await getAuthToken();
   if (!token) {
+    console.error('[Voca] callVocaAI: Authentication failed (token is null)');
     throw new Error('Not authenticated');
   }
+  console.log('[Voca] callVocaAI: Authenticated successfully, proceeding with request');
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -75,16 +124,23 @@ async function callVocaAI(payload) {
       signal: controller.signal,
     });
 
-    const data = await res.json();
+    const contentType = res.headers.get('content-type') || '';
+    let data;
+
+    if (contentType.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const text = await res.text();
+      console.error(`[Voca] Received non-JSON response from worker (Status: ${res.status}):`, text.substring(0, 500));
+      throw new Error(`Worker returned invalid response (Status: ${res.status}). This often means a configuration error or WAF block.`);
+    }
 
     if (!res.ok) {
       const error = new Error(data.error || `Server error: ${res.status}`);
-      // Attach usage info if available
-      if (data.upgrade_required) {
+      if (data.upgradeRequired) {
         error.upgradeRequired = true;
         error.limit = data.limit;
         error.plan = data.plan;
-        error.tier = data.tier; // Add tier info
       }
       throw error;
     }
@@ -92,8 +148,10 @@ async function callVocaAI(payload) {
     return {
       result: data.result,
       plan: data.plan,
-      remaining: data.remaining,
-      tier: data.tier, // Add tier info
+      messagesUsed: data.messagesUsed,
+      translationsUsed: data.translationsUsed,
+      messageLimit: data.messageLimit,
+      translationLimit: data.translationLimit
     };
   } finally {
     clearTimeout(timer);
@@ -109,10 +167,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     callVocaAI({ mode, text, targetLang, tone })
       .then(data => {
-        sendResponse({ 
+        sendResponse({
           result: data.result,
           plan: data.plan,
-          remaining: data.remaining,
+          messagesUsed: data.messagesUsed,
+          translationsUsed: data.translationsUsed,
+          messageLimit: data.messageLimit,
+          translationLimit: data.translationLimit
         });
       })
       .catch(err => {
@@ -124,14 +185,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         console.error('[Voca] AI request failed:', err);
 
         if (isLimitReached) {
-          sendResponse({ 
-            error: err.message || 'Monthly limit reached. Upgrade to continue using AI features.',
+          sendResponse({
+            error: err.message || 'Monthly limit reached. Buy credits to continue using AI features.',
             upgradeRequired: true,
             limit: err.limit,
             plan: err.plan,
           });
         } else if (isAuthError) {
-          sendResponse({ error: 'Please sign in to use AI features' });
+          console.warn('[Voca] Authentication error detected. Mode:', mode, 'Error:', err.message);
+          sendResponse({ error: 'Auth Error: ' + err.message });
         } else if (isRateLimit) {
           sendResponse({ error: 'Too many requests. Please wait a moment.' });
         } else if (isTimeout) {
@@ -155,23 +217,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     callVocaAI({ mode: 'auto-reply', messages, tone })
       .then(data => {
-        sendResponse({ 
-          result: data.result,
-          plan: data.plan,
-          remaining: data.remaining,
-        });
+        sendResponse(data);
       })
       .catch(err => {
         const isLimitReached = err.upgradeRequired || err.message?.includes('tier limit reached');
+        const isAuthError = err.message?.includes('Not authenticated') || err.message?.includes('token');
         console.error('[Voca] Auto-reply failed:', err);
-        
+
         if (isLimitReached) {
-          sendResponse({ 
-            error: err.message || 'Monthly limit reached. Upgrade to continue.',
+          sendResponse({
+            error: err.message || 'Monthly limit reached. Buy credits to continue.',
             upgradeRequired: true,
             limit: err.limit,
             plan: err.plan,
           });
+        } else if (isAuthError) {
+          console.warn('[Voca] Auto-reply auth error');
+          sendResponse({ error: 'Please sign in to use AI features' });
         } else {
           sendResponse({ error: err.message || 'Auto-reply failed' });
         }
@@ -260,6 +322,71 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     checkAuthStatus().then(sendResponse);
     return true;
   }
+
+  // Execute script in the MAIN world to bypass CSP & React Synthetic Events (e.g. WhatsApp Lexical)
+  if (msg.type === 'voca:execute-main') {
+    chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id },
+      world: 'MAIN',
+      func: async (value) => {
+        try {
+          let el = document.activeElement;
+          if (!el || el.getAttribute('contenteditable') !== 'true') {
+            el = document.querySelector('div[contenteditable="true"][data-lexical-editor="true"]') || document.querySelector('#main div[contenteditable="true"]');
+          }
+          if (el) {
+            el.focus();
+
+            // 1. Force Selection (Ctrl+A)
+            el.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'a', code: 'KeyA', ctrlKey: true, bubbles: true, cancelable: true
+            }));
+            document.execCommand('selectAll', false, null);
+
+            await new Promise(r => setTimeout(r, 50));
+
+            // 2. Single Delete
+            document.execCommand('delete', false, null);
+
+            await new Promise(r => setTimeout(r, 50));
+
+            // 3. Single Insertion
+            // Attempt insertText first as it's the cleanest
+            document.execCommand('insertText', false, value);
+
+            // Give a tiny moment for the DOM to update
+            await new Promise(r => setTimeout(r, 10));
+
+            // 4. Smart Fallback: Only paste if the text isn't there yet
+            // This prevents the duplication bug you saw in some Lexical editors
+            const currentText = el.innerText || el.textContent || "";
+            if (!currentText.includes(value.substring(0, Math.min(value.length, 10)))) {
+              const dt = new DataTransfer();
+              dt.setData('text/plain', value);
+              el.dispatchEvent(new ClipboardEvent('paste', {
+                clipboardData: dt,
+                bubbles: true,
+                cancelable: true
+              }));
+            }
+
+            // 5. Notify Lexical/React
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            return "SUCCESS";
+          }
+          return "ELEMENT_NOT_FOUND";
+        } catch (e) {
+          return "ERROR: " + e.toString();
+        }
+      },
+      args: [msg.value]
+    }).then((results) => {
+      sendResponse({ success: true, result: results[0]?.result });
+    }).catch(err => {
+      sendResponse({ error: err.message });
+    });
+    return true;
+  }
 });
 
 // ─── Auth Handlers ───────────────────────────────────────────────────────────
@@ -300,7 +427,7 @@ async function handleSignIn({ email, password }) {
         email: user.email,
         access_token: access_token,
         refresh_token: refresh_token,
-        expires_at: Date.now() + (expires_in * 1000)
+        expires_at: Date.now() + ((expires_in || 3600) * 1000)
       };
       await chrome.storage.local.set({ vocaUser });
 
@@ -327,8 +454,8 @@ async function handleSignUp({ email, password, name }) {
         'apikey': SUPABASE_ANON_KEY,
         'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
       },
-      body: JSON.stringify({ 
-        email, 
+      body: JSON.stringify({
+        email,
         password,
         data: { name }
       })
@@ -347,7 +474,7 @@ async function handleSignUp({ email, password, name }) {
         email: data.user.email,
         access_token: data.access_token,
         refresh_token: data.refresh_token,
-        expires_at: Date.now() + (data.expires_in * 1000)
+        expires_at: Date.now() + ((data.expires_in || 3600) * 1000)
       };
       await chrome.storage.local.set({ vocaUser });
 
@@ -364,7 +491,7 @@ async function handleGoogleAuth() {
   try {
     // Open OAuth popup
     const authUrl = `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(chrome.runtime.getURL('auth.html'))}`;
-    
+
     return new Promise((resolve) => {
       chrome.windows.create({
         url: authUrl,
@@ -400,3 +527,14 @@ async function handleGoogleAuth() {
 }
 
 // storeUserInDB removed - Handled securely by Cloudflare Worker UPSERT during sync
+// Handle SPA navigation (like LinkedIn/WhatsApp thread switches)
+chrome.webNavigation?.onHistoryStateUpdated?.addListener((details) => {
+  if (details.tabId) {
+    chrome.tabs.sendMessage(details.tabId, {
+      type: 'voca:nav',
+      url: details.url
+    }).catch(() => {
+      // Silently ignore errors for inactive/orphaned tabs
+    });
+  }
+});

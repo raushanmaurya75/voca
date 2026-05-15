@@ -7,10 +7,12 @@
   "permissions": [
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "webNavigation"
   ],
 
   "host_permissions": [
+    "<all_urls>",
     "https://voca-backend.tivitji.workers.dev/*",
     "https://*.supabase.co/*"
   ],
@@ -19,7 +21,8 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
 

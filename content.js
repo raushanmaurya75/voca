@@ -1,2253 +1,2264 @@
 "use strict";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const MIN_LENGTH = 5;
-const MAX_LENGTH = 1000;  // Prevent API spam while allowing longer messages
-const DEBOUNCE_MS = 600;
-const OFFSET_Y = 8;
-const REQUEST_TIMEOUT_MS = 30000;
+/**
+ * Voca AI - Content Script
+ * Premium Vertical UI Redesign (Inspired by Voca Premium Design System)
+ * Optimized for LinkedIn, WhatsApp, and complex SPAs.
+ */
 
-// Single in-flight request guard — blocks rapid clicks across all modes
-let _inflight = false;
+const CONSTANTS = {
+  MIN_LENGTH: 3,
+  LOGO_SIZE: 28,
+  PADDING: 8,
+  Z_INDEX: "2147483647",
+  IGNORE_ATTR: "data-voca-ignore",
+  PROCESSED_ATTR: "data-voca-processed",
+  SCAN_INTERVAL: 2000
+};
 
-// ─── Client-side Cache for Scale ──────────────────────────────────────────────
-// LRU Cache: key = "mode:text_hash" -> result (max 50 entries, 5min TTL)
-const _cache = new Map();
-const CACHE_MAX_SIZE = 50;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-// Pending requests deduplication: key -> array of callbacks
-const _pendingRequests = new Map();
-
-function getCacheKey(mode, text) {
-  // Simple hash for text
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    const char = text.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return `${mode}:${hash}`;
-}
-
-function getCachedResult(key) {
-  const entry = _cache.get(key);
-  if (!entry) return null;
-  
-  // Check TTL
-  if (Date.now() - entry.time > CACHE_TTL_MS) {
-    _cache.delete(key);
-    return null;
-  }
-  
-  return entry.result;
-}
-
-function setCachedResult(key, result) {
-  // LRU: delete oldest if at capacity
-  if (_cache.size >= CACHE_MAX_SIZE) {
-    const firstKey = _cache.keys().next().value;
-    _cache.delete(firstKey);
-  }
-  
-  _cache.set(key, { result, time: Date.now() });
-}
-
-// ─── Settings State ───────────────────────────────────────────────────────────
-let _aiEnabled = true;
-let _speakingLang = "English";
-let _lastTone = "Professional";
-let _lastLang = "English";
-
-chrome.storage.sync.get(
-  {
-    aiEnabled: true,
-    speakingLang: "English",
-    lastTone: "Professional",
-    lastLang: "English",
-  },
-  (prefs) => {
-    _aiEnabled = prefs.aiEnabled;
-    _speakingLang = prefs.speakingLang;
-    _lastTone = prefs.lastTone;
-    _lastLang = prefs.lastLang;
-    if (typeof updateButtonLabels === "function") updateButtonLabels();
-  },
-);
-
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "voca:setting") {
-    if (msg.key === "aiEnabled") {
-      _aiEnabled = msg.value;
-      if (!_aiEnabled) hideBar();
-    }
-    if (msg.key === "speakingLang") {
-      _speakingLang = msg.value;
-    }
-  }
-});
-
-const LANGUAGES = [
-  { code: "English", label: "English" },
-  { code: "Spanish", label: "Spanish" },
-  { code: "French", label: "French" },
-  { code: "German", label: "German" },
-  { code: "Italian", label: "Italian" },
-  { code: "Portuguese", label: "Portuguese" },
-  { code: "Hindi", label: "Hindi" },
-  { code: "Thai", label: "Thai" },
-  { code: "Chinese", label: "Chinese" },
-  { code: "Japanese", label: "Japanese" },
-  { code: "Korean", label: "Korean" },
-  { code: "Arabic", label: "Arabic" },
-  { code: "Russian", label: "Russian" },
-];
-
-const TONES = [
-  { code: "Professional", label: "Professional" },
-  { code: "Formal", label: "Formal" },
-  { code: "Friendly", label: "Friendly" },
-  { code: "Casual", label: "Casual" },
-  { code: "Confident", label: "Confident" },
-  { code: "Concise", label: "Concise" },
-  { code: "Business Collaboration", label: "Business Collab" },
-  { code: "Service Provider", label: "Service Provider" },
-];
-
-function getSafeLogoUrl() {
-  try {
-    return chrome.runtime.getURL("logo.png");
-  } catch (e) {
-    return "";
-  }
-}
-
-// ─── Element helpers ──────────────────────────────────────────────────────────
-function isEditable(el) {
-  if (!(el instanceof HTMLElement)) return false;
-  if (el.tagName === "TEXTAREA") return true;
-  if (el.tagName === "INPUT") {
-    const t = (el.getAttribute("type") || "text").toLowerCase();
-    return t === "text" || t === "";
-  }
-  return el.isContentEditable;
-}
-
-function getText(el) {
-  if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") return el.value;
-  return el.innerText ?? el.textContent ?? "";
-}
-
-async function applyText(el, newText, isSelection = false) {
-  if (!document.body.contains(el)) return;
-
-  if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
-    // Native setter bypasses React/Vue wrappers
-    if (!isSelection) {
-      const proto =
-        el.tagName === "TEXTAREA"
-          ? HTMLTextAreaElement.prototype
-          : HTMLInputElement.prototype;
+// ─── Native Overrides (Bridge) ────────────────────────────────────────────────
+const NativeBridge = {
+  applyToElement(el, value) {
+    if (!el) return;
+    console.log("[Voca] Applying text to element:", el);
+    
+    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+      const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-      setter ? setter.call(el, newText) : (el.value = newText);
+      if (setter) {
+        setter.call(el, value);
+      } else {
+        el.value = value;
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
     } else {
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
-      const val = el.value;
-      el.value = val.slice(0, start) + newText + val.slice(end);
-    }
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-  } else {
-    // ─── Robust Text Replacement for WhatsApp / Lexical / Strict Frameworks ───
+      // Find the root contenteditable in case we are deep inside a span/p
+      let targetEl = el;
+      while (targetEl && targetEl.parentElement && targetEl.getAttribute) {
+        if (targetEl.getAttribute("contenteditable") === "true") break;
+        targetEl = targetEl.parentElement;
+      }
+      if (targetEl && targetEl.getAttribute && targetEl.getAttribute("contenteditable") === "true") {
+        el = targetEl;
+      }
 
+      const isWhatsApp = window.location.hostname.includes("whatsapp.com");
+      
+      if (isWhatsApp) {
+        try {
+          chrome.runtime.sendMessage({ type: "voca:execute-main", value: value }, (response) => {
+             if (chrome.runtime.lastError) {
+                 console.error("[Voca] Main world execution error:", chrome.runtime.lastError);
+                 this._fallbackReplacement(el, value);
+             }
+          });
+          return;
+        } catch (e) {
+          console.warn("[Voca] Main world injection failed:", e);
+        }
+      }
+
+      this._fallbackReplacement(el, value);
+    }
+  },
+
+  _fallbackReplacement(el, value) {
     el.focus();
-    // If the user didn't explicitly highlight text, we must select all text to replace the whole box
-    if (!isSelection) {
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      sel.removeAllRanges();
-      sel.addRange(range);
-
-      document.execCommand("selectAll", false, null);
-
-      // CRITICAL YIELD: Strict frameworks (like Lexical on WhatsApp) listen to
-      // 'selectionchange' asynchronously.
-      await new Promise((r) => setTimeout(r, 50));
-    }
-
-    // Attempt native insertion (replaces active selection perfectly in most cases)
-    let success = document.execCommand("insertText", false, newText);
-
-    // Fallback Strategy for stubborn frameworks like Lexical
-    if (!success) {
+    
+    // Modern approach for framework-based editors (Lexical/React)
+    const selection = window.getSelection();
+    if (selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      
+      // Try to clear the field first to avoid duplication
       try {
-        const dataTransfer = new DataTransfer();
-        dataTransfer.setData("text/plain", newText);
-        const pasteEvent = new ClipboardEvent("paste", {
-          clipboardData: dataTransfer,
-          bubbles: true,
-          cancelable: true,
-        });
-        el.dispatchEvent(pasteEvent);
-      } catch(e) {
-        // Ultimate fallback if ClipboardEvent constructor fails
-        const inputEvent = new InputEvent('input', {
-          bubbles: true,
-          cancelable: true,
-          inputType: 'insertText',
-          data: newText,
-        });
-        el.dispatchEvent(inputEvent);
-      }
-    }
+        document.execCommand("selectAll", false, null);
+        document.execCommand("delete", false, null);
+      } catch (e) {}
 
-    // Force final UI state updates (crucial for WhatsApp's Send button to become active)
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Remove selection after insertion so user can type
-    const sel = window.getSelection();
-    if (sel) {
-      sel.collapseToEnd();
-    }
-    
-    // Focus the element back to resume typing
-    el.focus();
-  }
-}
-
-// ─── Floating action bar (Shadow DOM) ────────────────────────────────────────
-let _bar = null;
-
-function getBar() {
-  if (_bar) return _bar;
-
-  const host = document.createElement("div");
-  Object.assign(host.style, {
-    position: "fixed",
-    top: "0",
-    left: "0",
-    width: "0",
-    height: "0",
-    overflow: "visible",
-    pointerEvents: "none",
-    zIndex: "2147483646",
-  });
-  const shadow = host.attachShadow({ mode: "closed" });
-  shadow.innerHTML = `
-    <style>
-      .logo-row {
-        position: fixed; display: none; align-items: center; gap: 5px;
-        padding: 3px; border-radius: 9999px;
-        background: rgba(19, 19, 19, 0.85); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05), 0 4px 16px rgba(0,0,0,.3);
-        z-index: 2147483646; pointer-events: auto; transition: all 0.2s;
-      }
-      .logo-row.visible { display: flex; }
-
-      .logo-icon {
-        width: 24px; height: 24px; border-radius: 50%;
-        cursor: pointer; padding: 1px; flex-shrink: 0; transition: transform 0.2s;
-      }
-      .logo-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
-      .logo-icon:hover { transform: scale(1.1); }
-
-      .auto-reply-btn {
-        display: flex; align-items: center; justify-content: center; gap: 5px;
-        height: 28px; padding: 0 12px 0 8px; border-radius: 9999px; border: none;
-        background: rgba(0, 122, 255, 0.12); 
-        cursor: pointer; pointer-events: auto;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        font-size: 11px; font-weight: 600; color: #60a5fa;
-        letter-spacing: -0.01em; transition: all 0.2s; white-space: nowrap; outline: none;
-      }
-      .auto-reply-btn:hover { background: rgba(0, 122, 255, 0.22); color: #93c5fd; }
-      .auto-reply-btn svg { width: 13px; height: 13px; fill: currentColor; flex-shrink: 0; }
-
-      .row-divider {
-        width: 1px; height: 20px; background: rgba(255, 255, 255, 0.1); flex-shrink: 0;
-      }
-
-      .ar-panel {
-        position: fixed; display: none; pointer-events: auto;
-        width: 360px; overflow-y: auto;
-        background: rgba(19, 19, 19, 0.95); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: 0 8px 32px rgba(0,0,0,.5);
-        border-radius: 16px; padding: 16px;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        z-index: 2147483647;
-      }
-      .ar-panel.visible { display: block; }
-      .ar-panel::-webkit-scrollbar { width: 4px; }
-      .ar-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
-
-      .ar-title {
-        font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 12px;
-        display: flex; align-items: center; gap: 6px;
-      }
-      .ar-title svg { width: 16px; height: 16px; fill: #60a5fa; }
-
-      .ar-msg-list {
-        display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px;
-      }
-      .ar-msg {
-        padding: 8px 10px; border-radius: 10px;
-        font-size: 12px; line-height: 1.45; word-break: break-word;
-      }
-      .ar-msg.them {
-        background: rgba(255, 255, 255, 0.06); color: #d4d4d8; border: 1px solid rgba(255,255,255,0.06);
-      }
-      .ar-msg.me {
-        background: rgba(0, 122, 255, 0.1); color: #93c5fd; border: 1px solid rgba(0, 122, 255, 0.15);
-      }
-      .ar-msg .ar-sender {
-        font-size: 10px; font-weight: 700; text-transform: uppercase;
-        letter-spacing: 0.05em; margin-bottom: 3px; display: block;
-      }
-      .ar-msg.them .ar-sender { color: rgba(255,255,255,0.35); }
-      .ar-msg.me .ar-sender { color: rgba(0, 122, 255, 0.6); }
-
-      .ar-status {
-        display: flex; align-items: center; gap: 8px;
-        font-size: 12px; color: #a1a1aa; padding: 8px 0;
-      }
-      .ar-status .spinner {
-        width: 14px; height: 14px; border: 2px solid #60a5fa;
-        border-top-color: transparent; border-radius: 50%;
-        animation: spin 0.6s linear infinite;
-      }
-
-      .ar-result-box {
-        background: rgba(0, 122, 255, 0.08); border: 1px solid rgba(0, 122, 255, 0.2);
-        border-radius: 10px; padding: 10px 12px;
-        font-size: 13px; line-height: 1.5; color: #e4e4e7;
-        margin-bottom: 12px; word-break: break-word;
-      }
-
-      .ar-actions {
-        display: flex; gap: 8px; justify-content: flex-end;
-      }
-      .ar-btn {
-        padding: 7px 18px; border: none; border-radius: 9999px;
-        font-size: 12px; font-weight: 600; cursor: pointer;
-        transition: all 0.2s; outline: none;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      }
-      .ar-btn-cancel {
-        background: rgba(255, 255, 255, 0.08); color: #a1a1aa;
-      }
-      .ar-btn-cancel:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
-      .ar-btn-insert {
-        background: linear-gradient(135deg, #007AFF, #005bc1);
-        color: #fff; box-shadow: 0 0 12px rgba(0, 122, 255, 0.3);
-      }
-      .ar-btn-insert:hover { filter: brightness(1.15); transform: scale(1.03); }
-
-      .ar-error {
-        font-size: 12px; color: #f87171; padding: 6px 0;
-      }
-
-      .ar-no-messages {
-        font-size: 12px; color: #a1a1aa; text-align: center; padding: 16px 0;
-      }
-
-      .bar-container {
-        position: fixed; display: none; flex-direction: column; gap: 8px;
-        background: rgba(19, 19, 19, 0.8); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05), inset 0 0 10px rgba(255, 255, 255, 0.02), 0 8px 32px rgba(0, 0, 0, 0.4);
-        padding: 10px 12px; border-radius: 12px;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        pointer-events: auto; z-index: 2147483645;
-      }
-      .bar-container.visible { display: flex; }
-
-      .bar-header {
-        display: flex; justify-content: space-between; align-items: center; width: 100%;
-      }
-      .bar-hint {
-        font-size: 11px; color: #a1a1aa; font-style: italic; opacity: 0.9;
-      }
-      .btn-settings {
-        background: transparent; border: none; font-size: 16px; color: #a1a1aa; cursor: pointer; padding: 0 4px; outline: none; transition: color 0.15s;
-      }
-      .btn-settings:hover { color: #fff; }
-
-      .bar {
-        display: flex; align-items: center; gap: 4px;
-      }
-
-      .btn {
-        display: flex; align-items: center; justify-content: center; gap: 6px;
-        padding: 8px 14px; border: none; font-size: 13px; font-weight: 600;
-        cursor: pointer; white-space: nowrap; border-radius: 9999px;
-        transition: all 0.2s; background: rgba(255, 255, 255, 0.05); color: #e4e4e7;
-        margin: 0; letter-spacing: -0.01em; outline: none;
-      }
-      .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-      .btn:not(:disabled):hover { background: rgba(255, 255, 255, 0.1); color: #fff; box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); transform: scale(1.02); }
-      .btn:not(:disabled):active { transform: scale(0.95); }
-
-      .btn-group {
-        display: flex; align-items: stretch; border-radius: 9999px;
-        background: rgba(255, 255, 255, 0.05); transition: all 0.2s;
-      }
-      .btn-group:hover { background: rgba(255, 255, 255, 0.1); box-shadow: 0 0 15px rgba(255, 255, 255, 0.1); }
-      .btn-group .btn { background: transparent; box-shadow: none; transform: none; border-radius: 0; padding: 8px 12px; }
-      .btn-group .btn:not(:disabled):hover { background: rgba(255, 255, 255, 0.05); }
-      .btn-group .btn:not(:disabled):active { transform: scale(0.95); }
-      .btn-group .main-btn { padding-right: 8px; border-top-left-radius: 9999px; border-bottom-left-radius: 9999px; }
-      .btn-group .drop-btn { padding-left: 6px; padding-right: 10px; border-top-right-radius: 9999px; border-bottom-right-radius: 9999px; }
-      
-      .btn-divider { width: 1px; background: rgba(255, 255, 255, 0.1); margin: 6px 0; }
-
-      .btn-protrans {
-        background: rgba(0, 122, 255, 0.15); border: 1px solid rgba(0, 122, 255, 0.3);
-        color: #60a5fa; box-shadow: 0 0 15px rgba(0, 122, 255, 0.2);
-      }
-      .btn-protrans:not(:disabled):hover {
-        background: rgba(0, 122, 255, 0.25); color: #93c5fd; box-shadow: 0 0 20px rgba(0, 122, 255, 0.3);
-      }
-
-      .spinner {
-        display: inline-block; width: 12px; height: 12px;
-        border: 2px solid currentColor; border-top-color: transparent;
-        border-radius: 50%; opacity: .8;
-        animation: spin .6s linear infinite;
-        vertical-align: middle; margin-right: 4px;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-      .toast {
-        display: none; position: fixed;
-        top: 16px; left: 50%; transform: translateX(-50%);
-        background: rgba(19, 19, 19, 0.9); backdrop-filter: blur(16px);
-        color: #fff; font-size: 13px; font-weight: 500;
-        padding: 8px 16px; border-radius: 9999px; border: 1px solid rgba(255, 255, 255, 0.1);
-        white-space: nowrap; pointer-events: none;
-        box-shadow: 0 4px 16px rgba(0,0,0,.3);
-        z-index: 2147483647;
-      }
-      .toast.visible { display: block; }
-      
-      .translate-logo-row {
-        position: fixed; display: none; align-items: center; justify-content: center;
-        width: 28px; height: 28px;
-        background: #fff; border-radius: 50%;
-        box-shadow: 0 4px 12px rgba(0,0,0,.15);
-        pointer-events: auto; z-index: 2147483646; cursor: pointer;
-        transition: transform 0.2s;
-      }
-      .translate-logo-row:hover { transform: scale(1.1); }
-      .translate-logo-row.visible { display: flex; }
-      .translate-logo-row img { width: 16px; height: 16px; }
-    </style>
-    <div class="logo-row" id="logo-row">
-      <div class="logo-icon" id="logo-btn" title="Voca AI — Open toolbar">
-        <img src="${getSafeLogoUrl()}" alt="Voca">
-      </div>
-    </div>
-    <div class="translate-logo-row" id="translate-logo-row" title="Translate Selected Message">
-      <img src="${getSafeLogoUrl()}" alt="Translate">
-    </div>
-    <div class="ar-panel" id="ar-panel"></div>
-    <div class="bar-container" id="bar-container">
-      <div class="bar-header">
-        <span class="bar-hint">Select opposite side messages to translate to your language</span>
-        <button class="btn-settings" id="btn-settings" title="Settings">⚙</button>
-      </div>
-      <div class="bar" id="bar">
-        <button class="btn btn-writereply" id="btn-writereply">Write Reply</button>
-        <div class="btn-divider"></div>
-        <button class="btn btn-grammar" id="btn-grammar">Fix Grammar</button>
-        <button class="btn btn-improve" id="btn-improve-main">Improve</button>
-        <button class="btn btn-translate" id="btn-translate-main">Translate</button>
-      </div>
-    </div>
-    <div class="toast" id="bar-toast"></div>`;
-
-  document.body.appendChild(host);
-
-  _bar = {
-    host,
-    shadow,
-    logoRow: shadow.getElementById("logo-row"),
-    logoBtn: shadow.getElementById("logo-btn"),
-    translateLogoRow: shadow.getElementById("translate-logo-row"),
-    btnWriteReply: shadow.getElementById("btn-writereply"),
-    arPanel: shadow.getElementById("ar-panel"),
-    el: shadow.getElementById("bar-container"),
-    btnGrammar: shadow.getElementById("btn-grammar"),
-    btnImproveMain: shadow.getElementById("btn-improve-main"),
-    btnTranslateMain: shadow.getElementById("btn-translate-main"),
-    btnSettings: shadow.getElementById("btn-settings"),
-    toast: shadow.getElementById("bar-toast"),
-    activeEl: null,
-  };
-
-  // Prevent input focus loss when clicking anywhere on the bar/logo row
-  _bar.el.addEventListener("mousedown", (e) => e.preventDefault());
-  _bar.logoRow.addEventListener("mousedown", (e) => e.preventDefault());
-  _bar.logoBtn.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    _barExpanded = true;
-    showBar(_bar.activeEl);
-  });
-
-  // Write Reply button — scrape messages and show panel
-  _bar.btnWriteReply.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (_inflight || !_bar.activeEl) return;
-    triggerAutoReply(_bar.activeEl);
-  });
-
-  // Prevent panel interaction from losing input focus
-  _bar.arPanel.addEventListener("mousedown", (e) => e.preventDefault());
-
-  // Check text length before triggering API call
-  function checkTextLength(el) {
-    const selText = window.getSelection().toString().trim();
-    const fullText = getText(el).trim();
-    const textToProcess = selText.length > 0 ? selText : fullText;
-
-    if (textToProcess.length < MIN_LENGTH) {
-      showBarToast(`Text too short (min ${MIN_LENGTH} chars)`);
-      return false;
-    }
-    if (textToProcess.length > MAX_LENGTH) {
-      showBarToast(`Text too long — max ${MAX_LENGTH} chars`);
-      return false;
-    }
-    return true;
-  }
-
-  // Button click handlers — all guarded against in-flight requests and text length
-  _bar.btnGrammar.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (_inflight || !_bar.activeEl) return;
-    if (!checkTextLength(_bar.activeEl)) return;
-    triggerMode(_bar.activeEl, "grammar");
-  });
-
-  _bar.btnImproveMain.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (_inflight || !_bar.activeEl) return;
-    if (!checkTextLength(_bar.activeEl)) return;
-    triggerMode(_bar.activeEl, "improve", "", _lastTone);
-  });
-
-  _bar.btnTranslateMain.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (_inflight || !_bar.activeEl) return;
-    if (!checkTextLength(_bar.activeEl)) return;
-    triggerMode(_bar.activeEl, "translate", _lastLang, "");
-  });
-
-  _bar.translateLogoRow.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (_inflight) return;
-    const selection = window.getSelection().toString().trim();
-    if (selection.length < MIN_LENGTH) {
-      showBarToast(`Selection too short (min ${MIN_LENGTH} chars)`);
-      return;
-    }
-    if (selection.length > MAX_LENGTH) {
-      showBarToast(`Selection too long — max ${MAX_LENGTH} chars`);
-      return;
-    }
-    translateSelectedText(_bar.translateLogoRow);
-  });
-
-  _bar.btnSettings.addEventListener("click", (e) => {
-    e.stopPropagation();
-    showSettingsPanel(_bar.activeEl || _bar.translateLogoRow);
-  });
-
-  document.addEventListener("mouseup", (e) => {
-    const sel = window.getSelection();
-    const text = sel.toString().trim();
-    if (!text) {
-      _bar.translateLogoRow.classList.remove("visible");
-      return;
-    }
-
-    if (_bar.host.contains(e.target)) return;
-
-    const range = sel.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
-    let top = rect.top - 36;
-    let left = rect.left + rect.width / 2 - 14;
-
-    if (top < 0) top = rect.bottom + 8;
-
-    _bar.translateLogoRow.style.top = `${top}px`;
-    _bar.translateLogoRow.style.left = `${left}px`;
-    _bar.translateLogoRow.classList.add("visible");
-  });
-
-  document.addEventListener("selectionchange", () => {
-    const sel = window.getSelection();
-    if (!sel || !sel.toString().trim()) {
-      _bar?.translateLogoRow?.classList.remove("visible");
-    }
-  });
-
-  updateButtonLabels();
-  return _bar;
-}
-
-function updateButtonLabels() {
-  if (!_bar) return;
-  if (!_inflight) {
-    _bar.btnImproveMain.textContent = `Improve (${_lastTone})`;
-    _bar.btnTranslateMain.textContent = `Translate (${_lastLang})`;
-  }
-}
-
-// ─── Positioning ──────────────────────────────────────────────────────────────
-function positionNear(el, width = 0, height = 44) {
-  const rect = el.getBoundingClientRect();
-  let top = rect.top - height - OFFSET_Y;
-  let left = rect.left;
-  // If it goes off the top of the screen, place it below instead
-  if (top < 8) top = rect.bottom + OFFSET_Y;
-  if (left + width > window.innerWidth)
-    left = Math.max(8, window.innerWidth - width - 8);
-  return { top, left };
-}
-
-let _barExpanded = false;
-
-function showBar(el) {
-  const b = getBar();
-  b.activeEl = el;
-  const { top, left } = positionNear(el, 300, 44);
-
-  const text = getDeepestText(el).trim();
-  const isEmpty = text.length === 0;
-
-  if (_barExpanded || _inflight) {
-    b.el.style.top = `${top}px`;
-    b.el.style.left = `${left}px`;
-    b.el.classList.add("visible");
-    b.logoRow.classList.remove("visible");
-  } else {
-    b.el.classList.remove("visible");
-    b.logoRow.style.top = `${top}px`;
-    b.logoRow.style.left = `${left}px`;
-    b.logoRow.classList.add("visible");
-  }
-
-  if (!_inflight) {
-    setBarBusy(false);
-    b.btnGrammar.disabled = isEmpty;
-    b.btnImproveMain.disabled = isEmpty;
-    b.btnTranslateMain.disabled = isEmpty;
-    b.btnWriteReply.disabled = false;
-  }
-}
-
-function hideBar() {
-  _barExpanded = false;
-  _bar?.el.classList.remove("visible");
-  _bar?.logoRow.classList.remove("visible");
-  hideSettingsPanel();
-}
-
-function setBarBusy(busy, mode) {
-  const b = getBar();
-  const btns = [
-    b.btnGrammar,
-    b.btnImproveMain,
-    b.btnTranslateMain,
-    b.btnWriteReply,
-    b.btnSettings,
-  ];
-  for (const btn of btns) {
-    if (btn) btn.disabled = busy;
-  }
-
-  if (busy) {
-    if (mode === "auto-reply")
-      b.btnWriteReply.innerHTML = '<span class="spinner"></span>Working…';
-    if (mode === "grammar")
-      b.btnGrammar.innerHTML = '<span class="spinner"></span>Working…';
-    if (mode === "improve")
-      b.btnImproveMain.innerHTML = '<span class="spinner"></span>Working…';
-    if (mode === "translate")
-      b.btnTranslateMain.innerHTML = '<span class="spinner"></span>Working…';
-  } else {
-    b.btnWriteReply.textContent = "Write Reply";
-    b.btnGrammar.textContent = "Fix Grammar";
-    updateButtonLabels();
-  }
-}
-
-let _toastTimer = null;
-function showBarToast(msg, ms = 2500) {
-  const b = getBar();
-  b.toast.textContent = msg;
-  b.toast.classList.add("visible");
-  clearTimeout(_toastTimer);
-  _toastTimer = setTimeout(() => b.toast.classList.remove("visible"), ms);
-}
-
-// ─── Upgrade Prompt ───────────────────────────────────────────────────────────
-function showUpgradePrompt(type, response) {
-  const plan = response.plan || 'free';
-  const limit = response.limit || 0;
-  
-  // Custom messages based on plan tier
-  const messages = {
-    free: {
-      limit_reached: `You've used all ${limit} messages in your Free plan. Upgrade to any plan to get more messages and continue using AI features.`,
-      low_credits: `Only ${response.remaining} messages remaining. Upgrade to any plan to avoid interruption.`,
-    },
-    pro: {
-      limit_reached: `Your Pro plan quota of ${limit.toLocaleString()} messages has been exhausted. Upgrade to any plan to get more messages and continue using AI features.`,
-      low_credits: `Only ${response.remaining} messages left in your Pro plan. Upgrade to any plan for more messages.`,
-    },
-    premium: {
-      limit_reached: `You've reached your Premium plan limit of ${limit.toLocaleString()} messages this month. Upgrade to any plan to get more messages and continue using AI features.`,
-      low_credits: `Only ${response.remaining} messages remaining in your Premium plan. Upgrade to any plan for more messages.`,
-    },
-  };
-  
-  const message = messages[plan]?.[type] || messages.free.limit_reached;
-  
-  // Create upgrade modal
-  const modal = document.createElement('div');
-  modal.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 2147483647;
-    font-family: system-ui, -apple-system, sans-serif;
-  `;
-  
-  modal.innerHTML = `
-    <div style="
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 16px;
-      padding: 24px;
-      max-width: 380px;
-      width: 90%;
-      color: white;
-      text-align: center;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-    ">
-      <div style="font-size: 48px; margin-bottom: 16px;">⭐</div>
-      <h3 style="margin: 0 0 12px 0; font-size: 20px; font-weight: 600;">Upgrade Your Plan</h3>
-      <p style="margin: 0 0 20px 0; font-size: 14px; color: #9ca3af; line-height: 1.5;">${message}</p>
-      
-      <div style="display: grid; gap: 8px; margin-bottom: 16px;">
-        <div style="
-          background: rgba(255,255,255,0.05);
-          border: 1px solid rgba(255,255,255,0.1);
-          border-radius: 8px;
-          padding: 12px;
-          text-align: left;
-        ">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-            <span style="font-weight: 600;">Pro Plan</span>
-            <span style="color: #60a5fa; font-weight: 600;">$8/month</span>
-          </div>
-          <div style="font-size: 12px; color: #9ca3af;">2,300 messages + 1,500 translations</div>
-        </div>
+      // Wait a tick for the editor to sync the empty state
+      setTimeout(() => {
+        try {
+          // 1. Primary method: insertText (safest for internal state)
+          if (!document.execCommand("insertText", false, value)) {
+             throw new Error("execCommand failed");
+          }
+        } catch (e) {
+          // 2. Fallback: Clipboard Event (Paste)
+          try {
+            const dataTransfer = new DataTransfer();
+            dataTransfer.setData("text/plain", value);
+            const pasteEvent = new ClipboardEvent("paste", {
+              clipboardData: dataTransfer,
+              bubbles: true,
+              cancelable: true
+            });
+            el.dispatchEvent(pasteEvent);
+          } catch (e2) {
+            // 3. Last resort: Direct DOM manipulation (may break React/Lexical state but better than nothing)
+            el.innerText = value;
+            el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+          }
+        }
         
-        <div style="
-          background: rgba(255,255,255,0.05);
-          border: 1px solid rgba(255,255,255,0.1);
-          border-radius: 8px;
+        // Final event trigger
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }, 20);
+    }
+  }
+};
+
+// ─── UI Host (Shadow DOM) ───────────────────────────────────────────────────
+class UIHost {
+  constructor() {
+    this.container = null;
+    this.shadow = null;
+    this.logo = null;
+    this.panel = null;
+    this.status = null;
+    this.activeField = null;
+    this.expanded = false;
+    this.settings = { speakingLang: "English", translateLang: "Spanish", tone: "Professional" };
+    this.selectionLogo = null;
+    this.dialog = null;
+    this.isDialogVisible = false;
+    this.isResponseVisible = false;
+    this.isReadOnlyResponse = false;
+    this.pendingResult = "";
+    this.responseBox = null;
+    this.typingTimeout = null;
+    this.isTyping = false;
+    this.currentAction = "";
+    
+    this._init();
+    this._loadSettings();
+  }
+
+  async _loadSettings() {
+    try {
+      if (!chrome.runtime?.id) return;
+      const prefs = await chrome.storage.sync.get({ 
+        speakingLang: "English", 
+        translateLang: "Spanish", 
+        tone: "Professional" 
+      });
+      this.settings = prefs;
+      this._updateSettingsUI();
+    } catch (e) {
+      console.warn("[Voca] Failed to load settings (likely context invalidated):", e);
+    }
+  }
+
+  _updateSettingsUI() {
+    if (!this.shadow) return;
+    const langSub = this.shadow.querySelector("#lang-label");
+    const toneSub = this.shadow.querySelector("#tone-label");
+    if (langSub) langSub.textContent = `(${this.settings.translateLang})`;
+    if (toneSub) toneSub.textContent = `(${this.settings.tone})`;
+  }
+
+  _init() {
+    if (document.getElementById("voca-host")) return;
+
+    this.container = document.createElement("div");
+    this.container.id = "voca-host";
+    this.container.setAttribute(CONSTANTS.IGNORE_ATTR, "true");
+    Object.assign(this.container.style, {
+      position: "fixed",
+      top: "0",
+      left: "0",
+      width: "0",
+      height: "0",
+      zIndex: CONSTANTS.Z_INDEX,
+      pointerEvents: "none",
+      overflow: "visible"
+    });
+
+    this.shadow = this.container.attachShadow({ mode: "open" });
+    this.shadow.innerHTML = this._getStyles() + this._getHtml();
+    
+    // Inject font into main document as well (fallback for some sites)
+    this._injectFonts();
+    
+    document.body.appendChild(this.container);
+    this._bindElements();
+  }
+
+  _injectFonts() {
+    const fontUrl = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;500;600&display=swap";
+    if (!document.querySelector(`link[href="${fontUrl}"]`)) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = fontUrl;
+      document.head.appendChild(link);
+    }
+  }
+
+  _getStyles() {
+    return `
+      <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;500;600&display=swap');
+        
+        :host { 
+          all: initial; 
+          font-family: 'Inter', sans-serif;
+          color: var(--text);
+          --primary: #adc6ff;
+          --bg: rgba(0, 0, 0, 0.95);
+          --border: rgba(255, 255, 255, 0.12);
+          --text: #e5e2e1;
+          --text-dim: #c1c6d7;
+          --radius: 16px;
+          --accent: #3b82f6;
+        }
+
+        .voca-logo {
+          position: fixed;
+          width: 24px;
+          height: 24px;
+          background: #000;
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+          border: 1px solid var(--border);
+          border-radius: 50%;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          pointer-events: auto;
+          transition: all 0.25s cubic-bezier(0.2, 1, 0.3, 1);
+          z-index: 10000;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .voca-logo.visible { display: flex; }
+        
+        .voca-logo.breathing {
+          animation: breathe 1.5s ease-in-out infinite;
+          opacity: 1 !important;
+          display: flex !important;
+        }
+
+        .voca-logo:hover { 
+          transform: scale(1.1);
+          border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        .voca-logo.typing {
+          width: 8px;
+          height: 8px;
+          background: var(--accent);
+          border: none;
+          box-shadow: 0 0 12px var(--accent);
+          transform: scale(1);
+        }
+        
+        .voca-logo.typing img { opacity: 0; display: none; }
+        .voca-logo img { width: 14px; height: 14px; object-fit: contain; }
+
+        .voca-panel {
+          background: var(--bg);
+          backdrop-filter: blur(25px);
+          -webkit-backdrop-filter: blur(25px);
+          border: 1px solid var(--border);
+          border-radius: 18px;
+          padding: 8px;
+          box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+          pointer-events: auto;
+          z-index: 1001;
+          animation: barIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          position: fixed;
+          width: max-content;
+          display: none;
+          flex-direction: column;
+        }
+        @keyframes barIn {
+          from { opacity: 0; transform: translateY(5px) scale(0.98); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .voca-panel.visible { display: flex; }
+
+        .logo-circle {
+          width: 20px;
+          height: 20px;
+          background: var(--primary);
+          border-radius: 6px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #000;
+          flex-shrink: 0;
+        }
+
+        .logo-circle svg {
+          width: 14px;
+          height: 14px;
+        }
+
+        .status-container {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          color: var(--primary);
+          font-size: 11px;
+          font-weight: 600;
+          padding: 0 8px;
+        }
+
+        .voca-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          width: 100%;
+          height: 20px;
+          padding: 0 4px 6px 4px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          margin-bottom: 6px;
+        }
+        .header-text { font-size: 9px; color: var(--text-dim); font-weight: 500; letter-spacing: 0.2px; }
+        
+        .settings-btn {
+          background: none;
+          border: none;
+          color: var(--text-dim);
+          cursor: pointer;
+          padding: 2px;
+          display: flex;
+          align-items: center;
+          transition: color 0.2s;
+        }
+        .settings-btn:hover { color: var(--text); }
+        .settings-btn svg { width: 14px; height: 14px; }
+
+        .voca-dialog {
+          position: absolute;
+          display: none;
+          flex-direction: column;
+          width: 240px;
+          background: #0d0d0d;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 14px;
+          box-shadow: 0 15px 50px rgba(0,0,0,0.9);
+          z-index: 10005;
+          position: fixed;
+          pointer-events: auto;
+          gap: 12px;
+        }
+        .voca-dialog.visible { display: flex; }
+        .setting-item { display: flex; flex-direction: column; gap: 4px; }
+        .setting-label { font-size: 11px; color: var(--text-dim); }
+        .setting-select {
+          background: #1a1a1a;
+          border: 1px solid var(--border);
+          color: var(--text);
+          font-size: 12px;
+          padding: 6px;
+          border-radius: 6px;
+          outline: none;
+        }
+
+        .response-box {
+          position: absolute;
+          display: none;
+          flex-direction: column;
+          width: 320px;
+          background: var(--bg);
+          backdrop-filter: blur(25px);
+          border: 1px solid var(--border);
+          border-radius: 16px;
           padding: 12px;
-          text-align: left;
-        ">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-            <span style="font-weight: 600;">Premium Plan</span>
-            <span style="color: #a78bfa; font-weight: 600;">$12/month</span>
+          box-shadow: 0 12px 50px rgba(0,0,0,0.8);
+          z-index: 10002;
+          position: fixed;
+          pointer-events: auto;
+          gap: 8px;
+        }
+        .response-box.visible { display: flex; }
+        .box-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
+        .box-label.original {
+          color: #ff5252;
+          font-weight: 600;
+        }
+
+        .box-label.action {
+          color: #4caf50;
+          font-weight: 600;
+        }
+
+        .box-content {
+          font-size: 13px;
+          line-height: 1.5;
+          color: var(--text);
+          background: rgba(255,255,255,0.03);
+          padding: 10px;
+          border-radius: 8px;
+          margin-bottom: 12px;
+          max-height: 150px;
+          overflow-y: auto;
+          opacity: 0.85;
+          border: 1px solid rgba(255,255,255,0.05);
+        }
+        .box-footer { display: flex; gap: 8px; margin-top: 4px; }
+        .box-btn {
+          flex: 1;
+          height: 32px;
+          border-radius: 8px;
+          border: none;
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .btn-apply { background: var(--accent); color: white; }
+        .btn-apply:hover { opacity: 0.9; }
+        .btn-cancel { background: rgba(255,255,255,0.1); color: var(--text); }
+        .btn-cancel:hover { background: rgba(255,255,255,0.15); }
+
+        .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .action-btn {
+          background: rgba(255, 255, 255, 0.05);
+          border: none;
+          color: var(--text);
+          padding: 0 10px;
+          height: 26px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          white-space: nowrap;
+        }
+        .action-btn:hover:not(:disabled) { 
+          background: rgba(255, 255, 255, 0.12);
+          box-shadow: 0 0 15px rgba(255, 255, 255, 0.05);
+        }
+        .action-btn:active { transform: scale(0.96); }
+        
+        .action-btn.accent {
+          background: rgba(173, 198, 255, 0.15);
+          color: var(--primary);
+          border: 1px solid rgba(173, 198, 255, 0.2);
+        }
+
+        .btn-wrapper {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 2px;
+        }
+
+        .credit-cost {
+          font-size: 8px;
+          color: var(--text-dim);
+          opacity: 0.6;
+          font-weight: 500;
+          letter-spacing: 0.2px;
+        }
+
+        .selection-logo {
+          position: absolute;
+          width: 24px;
+          height: 24px;
+          background: var(--primary);
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+          z-index: 10001;
+          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+          opacity: 0;
+          transform: scale(0.8);
+          pointer-events: none;
+          border: 2px solid white;
+          color: white;
+        }
+        .selection-logo:hover {
+          transform: scale(1.1);
+          background: #4d82ff;
+        }
+        .selection-logo.visible { display: flex; opacity: 1; transform: scale(1); pointer-events: auto; }
+        .selection-logo.breathing {
+          animation: breathe 1.5s ease-in-out infinite;
+        }
+        .selection-logo img { width: 14px; height: 14px; }
+
+        .response-box.read-only .btn-apply { display: block; background: var(--accent); color: white; }
+        .response-box.read-only .btn-apply:after { content: ' to Input'; }
+        .response-box.read-only .btn-copy-res { background: rgba(255,255,255,0.1); color: var(--text); }
+
+
+        @keyframes breathe {
+          0%, 100% { transform: scale(1); opacity: 1; border-color: var(--border); }
+          50% { transform: scale(1.1); opacity: 0.7; border-color: var(--primary); }
+        }
+
+        .subtext { 
+          font-size: 12px; 
+          color: inherit; 
+          font-weight: 600;
+          opacity: 1;
+          margin-left: 4px;
+        }
+        
+        .status-container {
+          padding-left: 8px;
+          padding-right: 12px;
+          border-left: 1px solid var(--border);
+          font-size: 12px;
+          color: var(--primary);
+          font-weight: 600;
+          height: 20px;
+          display: flex;
+          align-items: center;
+        }
+
+        .loading-dots:after {
+          content: '.';
+          animation: dots 1.5s steps(5, end) infinite;
+        }
+        @keyframes dots {
+          0% { content: ''; }
+          25% { content: '.'; }
+          50% { content: '..'; }
+          75% { content: '...'; }
+          100% { content: ''; }
+        }
+        .loading-dots {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 24px;
+        }
+      </style>
+    `;
+  }
+
+  _getHtml() {
+    const logoUrl = chrome.runtime.getURL("logo.png");
+    return `
+      <div id="logo" class="voca-logo">
+        <img src="${logoUrl}" alt="">
+      </div>
+      <div id="selection-logo" class="selection-logo">
+        <img src="${logoUrl}" alt="">
+      </div>
+      <div id="panel" class="voca-panel">
+        <div class="voca-header">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-family: 'Outfit', sans-serif; color: rgba(255, 255, 255, 0.4); font-weight: 400; font-size: 10px; letter-spacing: 0.3px; text-transform: uppercase;">Select opposite side message to translate in your language</span>
           </div>
-          <div style="font-size: 12px; color: #9ca3af;">5,000 messages + 4,000 translations</div>
+          <button id="btn-settings" class="settings-btn" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          </button>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 6px; padding: 0 2px;">
+          <div class="btn-wrapper">
+            <button class="action-btn accent" id="btn-reply">Write Reply</button>
+            <span class="credit-cost">3 credits</span>
+          </div>
+          <div class="btn-wrapper">
+            <button class="action-btn" id="btn-fix">Fix Grammar</button>
+            <span class="credit-cost">1 credit</span>
+          </div>
+          <div class="btn-wrapper">
+            <button class="action-btn" id="btn-improve">Improve <span class="subtext" id="tone-label">(Professional)</span></button>
+            <span class="credit-cost">1 credit</span>
+          </div>
+          <div class="btn-wrapper">
+            <button class="action-btn" id="btn-translate">Translate <span class="subtext" id="lang-label">(Spanish)</span></button>
+            <span class="credit-cost">1 credit</span>
+          </div>
+          <div id="status-box" class="status-container" style="display:none; align-self: center; height: 32px;">
+            <span id="status-text">Thinking</span>
+          </div>
         </div>
       </div>
-      
-      <button id="voca-upgrade-btn" style="
-        width: 100%;
-        padding: 12px;
-        background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%);
-        border: none;
-        border-radius: 8px;
-        color: white;
-        font-weight: 600;
-        cursor: pointer;
-        margin-bottom: 8px;
-        font-size: 14px;
-      ">Upgrade Now</button>
-      
-      <button id="voca-close-btn" style="
-        width: 100%;
-        padding: 12px;
-        background: transparent;
-        border: 1px solid rgba(255,255,255,0.2);
-        border-radius: 8px;
-        color: #9ca3af;
-        cursor: pointer;
-        font-size: 14px;
-      ">Maybe Later</button>
-    </div>
-  `;
-  
-  document.body.appendChild(modal);
-  
-  // Handle button clicks
-  modal.querySelector('#voca-upgrade-btn').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'voca:open-upgrade' });
-    modal.remove();
-  });
-  
-  modal.querySelector('#voca-close-btn').addEventListener('click', () => {
-    modal.remove();
-  });
-  
-  // Close on backdrop click
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.remove();
-  });
-}
-
-// ─── Unified Settings Panel (Shadow DOM) ──────────────────────────────────────
-let _settingsPanel = null;
-
-function getSettingsPanel() {
-  if (_settingsPanel) return _settingsPanel;
-
-  const host = document.createElement("div");
-  Object.assign(host.style, {
-    position: "fixed",
-    top: "0",
-    left: "0",
-    width: "0",
-    height: "0",
-    overflow: "visible",
-    pointerEvents: "none",
-    zIndex: "2147483646",
-  });
-
-  const shadow = host.attachShadow({ mode: "closed" });
-  shadow.innerHTML = `
-    <style>
-      .picker {
-        display: none; position: fixed; pointer-events: auto;
-        background: rgba(19, 19, 19, 0.8); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px;
-        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05), inset 0 0 10px rgba(255, 255, 255, 0.02), 0 8px 32px rgba(0, 0, 0, 0.4);
-        padding: 14px;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        min-width: 220px;
-        z-index: 2147483648;
-      }
-      .picker.visible { display: block; }
-      .picker-title {
-        font-size: 13px; font-weight: 600; color: #fff;
-        margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between;
-      }
-      .field { margin-bottom: 12px; }
-      label { display: block; font-size: 12px; color: #a1a1aa; margin-bottom: 6px; }
-      select {
-        width: 100%; padding: 8px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px;
-        font-size: 13px; color: #fff; background: rgba(255, 255, 255, 0.05);
-        outline: none; transition: border 0.2s; cursor: pointer;
-      }
-      select:focus { border-color: rgba(255, 255, 255, 0.3); }
-      select option { background: #1f1f1f; color: #fff; }
-      .close-btn {
-        margin-top: 4px; width: 100%; padding: 8px; background: rgba(255, 255, 255, 0.1);
-        border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; color: #fff;
-        transition: background 0.2s;
-      }
-      .close-btn:hover { background: rgba(255, 255, 255, 0.15); }
-    </style>
-    <div class="picker" id="picker">
-      <div class="picker-title">Voca Settings</div>
-      <div class="field">
-        <label>Translation Language (for sending)</label>
-        <select id="lang-select"></select>
+      <div id="dialog" class="voca-dialog">
+        <div class="setting-item">
+          <span class="setting-label">Speaking Language (Input)</span>
+          <select id="sel-speaking" class="setting-select">
+            <option value="English">English</option>
+            <option value="Hindi">Hindi</option>
+            <option value="Spanish">Spanish</option>
+            <option value="French">French</option>
+            <option value="German">German</option>
+            <option value="Chinese (Simplified)">Chinese (Simplified)</option>
+            <option value="Chinese (Traditional)">Chinese (Traditional)</option>
+            <option value="Japanese">Japanese</option>
+            <option value="Russian">Russian</option>
+            <option value="Portuguese">Portuguese</option>
+            <option value="Italian">Italian</option>
+            <option value="Arabic">Arabic</option>
+            <option value="Korean">Korean</option>
+            <option value="Dutch">Dutch</option>
+            <option value="Turkish">Turkish</option>
+            <option value="Bengali">Bengali</option>
+            <option value="Marathi">Marathi</option>
+            <option value="Telugu">Telugu</option>
+            <option value="Tamil">Tamil</option>
+            <option value="Urdu">Urdu</option>
+            <option value="Punjabi">Punjabi</option>
+            <option value="Vietnamese">Vietnamese</option>
+            <option value="Thai">Thai</option>
+            <option value="Indonesian">Indonesian</option>
+            <option value="Hebrew">Hebrew</option>
+            <option value="Polish">Polish</option>
+            <option value="Swedish">Swedish</option>
+            <option value="Greek">Greek</option>
+            <option value="Romanian">Romanian</option>
+            <option value="Hungarian">Hungarian</option>
+            <option value="Czech">Czech</option>
+            <option value="Danish">Danish</option>
+            <option value="Finnish">Finnish</option>
+            <option value="Norwegian">Norwegian</option>
+            <option value="Malay">Malay</option>
+            <option value="Gujarati">Gujarati</option>
+            <option value="Kannada">Kannada</option>
+            <option value="Malayalam">Malayalam</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <span class="setting-label">Translate Language (Output)</span>
+          <select id="sel-translate" class="setting-select">
+            <option value="Spanish">Spanish</option>
+            <option value="English">English</option>
+            <option value="Hindi">Hindi</option>
+            <option value="French">French</option>
+            <option value="German">German</option>
+            <option value="Chinese (Simplified)">Chinese (Simplified)</option>
+            <option value="Chinese (Traditional)">Chinese (Traditional)</option>
+            <option value="Japanese">Japanese</option>
+            <option value="Russian">Russian</option>
+            <option value="Portuguese">Portuguese</option>
+            <option value="Italian">Italian</option>
+            <option value="Arabic">Arabic</option>
+            <option value="Korean">Korean</option>
+            <option value="Dutch">Dutch</option>
+            <option value="Turkish">Turkish</option>
+            <option value="Bengali">Bengali</option>
+            <option value="Marathi">Marathi</option>
+            <option value="Telugu">Telugu</option>
+            <option value="Tamil">Tamil</option>
+            <option value="Urdu">Urdu</option>
+            <option value="Punjabi">Punjabi</option>
+            <option value="Vietnamese">Vietnamese</option>
+            <option value="Thai">Thai</option>
+            <option value="Indonesian">Indonesian</option>
+            <option value="Hebrew">Hebrew</option>
+            <option value="Polish">Polish</option>
+            <option value="Swedish">Swedish</option>
+            <option value="Greek">Greek</option>
+            <option value="Romanian">Romanian</option>
+            <option value="Hungarian">Hungarian</option>
+            <option value="Czech">Czech</option>
+            <option value="Danish">Danish</option>
+            <option value="Finnish">Finnish</option>
+            <option value="Norwegian">Norwegian</option>
+            <option value="Malay">Malay</option>
+            <option value="Gujarati">Gujarati</option>
+            <option value="Kannada">Kannada</option>
+            <option value="Malayalam">Malayalam</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <span class="setting-label">AI Tone</span>
+          <select id="sel-tone" class="setting-select">
+            <option value="Professional">Professional</option>
+            <option value="Formal">Formal</option>
+            <option value="Friendly">Friendly</option>
+            <option value="Casual">Casual</option>
+            <option value="Confident">Confident</option>
+            <option value="Concise">Concise</option>
+            <option value="Business Collaboration">Business Collaboration</option>
+            <option value="Service Provider">Service Provider</option>
+            <option value="Sarcastic">Sarcastic</option>
+            <option value="Enthusiastic">Enthusiastic</option>
+            <option value="Persuasive">Persuasive</option>
+            <option value="Bold">Bold</option>
+            <option value="Empathetic">Empathetic</option>
+            <option value="Humorous">Humorous</option>
+            <option value="Thoughtful">Thoughtful</option>
+            <option value="Curious">Curious</option>
+            <option value="Direct">Direct</option>
+            <option value="Academic">Academic</option>
+            <option value="Creative">Creative</option>
+            <option value="Inspirational">Inspirational</option>
+            <option value="Diplomatic">Diplomatic</option>
+            <option value="Urgent">Urgent</option>
+            <option value="Sincere">Sincere</option>
+            <option value="Playful">Playful</option>
+            <option value="Aggressive">Aggressive</option>
+            <option value="Passive">Passive</option>
+            <option value="Instructional">Instructional</option>
+            <option value="Narrative">Narrative</option>
+            <option value="Descriptive">Descriptive</option>
+            <option value="Expository">Expository</option>
+            <option value="Persuasive">Persuasive</option>
+            <option value="Analytical">Analytical</option>
+            <option value="Critical">Critical</option>
+            <option value="Poetic">Poetic</option>
+            <option value="Mysterious">Mysterious</option>
+            <option value="Melancholic">Melancholic</option>
+            <option value="Nostalgic">Nostalgic</option>
+            <option value="Cynical">Cynical</option>
+            <option value="Optimistic">Optimistic</option>
+            <option value="Skeptical">Skeptical</option>
+            <option value="Appreciative">Appreciative</option>
+            <option value="Apologetic">Apologetic</option>
+            <option value="Condescending">Condescending</option>
+            <option value="Encouraging">Encouraging</option>
+            <option value="Indifferent">Indifferent</option>
+            <option value="Ironical">Ironical</option>
+            <option value="Objective">Objective</option>
+            <option value="Subjective">Subjective</option>
+            <option value="Whimsical">Whimsical</option>
+            <option value="Witty">Witty</option>
+            <option value="Zealous">Zealous</option>
+            <option value="Apathetic">Apathetic</option>
+            <option value="Compassionate">Compassionate</option>
+            <option value="Contemptuous">Contemptuous</option>
+            <option value="Disdainful">Disdainful</option>
+            <option value="Egotistical">Egotistical</option>
+            <option value="Humble">Humble</option>
+            <option value="Mocking">Mocking</option>
+            <option value="Pompous">Pompous</option>
+            <option value="Reverent">Reverent</option>
+            <option value="Solemn">Solemn</option>
+            <option value="Tragic">Tragic</option>
+            <option value="Vibrant">Vibrant</option>
+            <option value="Warm">Warm</option>
+            <option value="Cold">Cold</option>
+            <option value="Hostile">Hostile</option>
+            <option value="Affectionate">Affectionate</option>
+            <option value="Bitter">Bitter</option>
+            <option value="Calm">Calm</option>
+            <option value="Defiant">Defiant</option>
+            <option value="Gloomy">Gloomy</option>
+            <option value="Joyful">Joyful</option>
+            <option value="Loving">Loving</option>
+            <option value="Mad">Mad</option>
+            <option value="Sad">Sad</option>
+            <option value="Scared">Scared</option>
+            <option value="Surprised">Surprised</option>
+            <option value="Trusting">Trusting</option>
+            <option value="Guilty">Guilty</option>
+            <option value="Ashamed">Ashamed</option>
+            <option value="Proud">Proud</option>
+            <option value="Disappointed">Disappointed</option>
+            <option value="Satisfied">Satisfied</option>
+            <option value="Frustrated">Frustrated</option>
+            <option value="Bored">Bored</option>
+            <option value="Excited">Excited</option>
+            <option value="Anxious">Anxious</option>
+            <option value="Relaxed">Relaxed</option>
+            <option value="Stressed">Stressed</option>
+            <option value="Tired">Tired</option>
+            <option value="Energetic">Energetic</option>
+            <option value="Peaceful">Peaceful</option>
+            <option value="Violent">Violent</option>
+            <option value="Gentle">Gentle</option>
+            <option value="Rough">Rough</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Hard">Hard</option>
+            <option value="Soft">Soft</option>
+            <option value="Strong">Strong</option>
+            <option value="Weak">Weak</option>
+            <option value="Old">Old</option>
+            <option value="New">New</option>
+            <option value="Fast">Fast</option>
+            <option value="Slow">Slow</option>
+            <option value="High">High</option>
+            <option value="Low">Low</option>
+            <option value="Big">Big</option>
+            <option value="Small">Small</option>
+            <option value="Hot">Hot</option>
+            <option value="Cold">Cold</option>
+            <option value="Bright">Bright</option>
+            <option value="Dark">Dark</option>
+            <option value="Loud">Loud</option>
+            <option value="Quiet">Quiet</option>
+            <option value="Heavy">Heavy</option>
+            <option value="Light">Light</option>
+            <option value="Thick">Thick</option>
+            <option value="Thin">Thin</option>
+            <option value="Wide">Wide</option>
+            <option value="Narrow">Narrow</option>
+            <option value="Long">Long</option>
+            <option value="Short">Short</option>
+            <option value="Deep">Deep</option>
+            <option value="Shallow">Shallow</option>
+            <option value="Rich">Rich</option>
+            <option value="Poor">Poor</option>
+            <option value="Expensive">Expensive</option>
+            <option value="Cheap">Cheap</option>
+            <option value="Easy">Easy</option>
+            <option value="Difficult">Difficult</option>
+            <option value="Simple">Simple</option>
+            <option value="Complex">Complex</option>
+            <option value="Clean">Clean</option>
+            <option value="Dirty">Dirty</option>
+            <option value="Clear">Clear</option>
+            <option value="Blurry">Blurry</option>
+            <option value="Perfect">Perfect</option>
+            <option value="Flawed">Flawed</option>
+            <option value="Beautiful">Beautiful</option>
+            <option value="Ugly">Ugly</option>
+            <option value="Happy">Happy</option>
+            <option value="Sad">Sad</option>
+            <option value="Good">Good</option>
+            <option value="Bad">Bad</option>
+            <option value="Right">Right</option>
+            <option value="Wrong">Wrong</option>
+            <option value="True">True</option>
+            <option value="False">False</option>
+            <option value="Real">Real</option>
+            <option value="Fake">Fake</option>
+            <option value="Possible">Possible</option>
+            <option value="Impossible">Impossible</option>
+            <option value="Certain">Certain</option>
+            <option value="Uncertain">Uncertain</option>
+            <option value="Likely">Likely</option>
+            <option value="Unlikely">Unlikely</option>
+            <option value="Always">Always</option>
+            <option value="Never">Never</option>
+            <option value="Sometimes">Sometimes</option>
+            <option value="Often">Often</option>
+            <option value="Rarely">Rarely</option>
+            <option value="Early">Early</option>
+            <option value="Late">Late</option>
+            <option value="Young">Young</option>
+            <option value="Old">Old</option>
+            <option value="Large">Large</option>
+            <option value="Small">Small</option>
+            <option value="Open">Open</option>
+            <option value="Closed">Closed</option>
+            <option value="Full">Full</option>
+            <option value="Empty">Empty</option>
+            <option value="Heavy">Heavy</option>
+            <option value="Light">Light</option>
+            <option value="Sharp">Sharp</option>
+            <option value="Dull">Dull</option>
+            <option value="Hard">Hard</option>
+            <option value="Soft">Soft</option>
+            <option value="Rough">Rough</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Sweet">Sweet</option>
+            <option value="Sour">Sour</option>
+            <option value="Bitter">Bitter</option>
+            <option value="Salty">Salty</option>
+            <option value="Hot">Hot</option>
+            <option value="Cold">Cold</option>
+            <option value="Dry">Dry</option>
+            <option value="Wet">Wet</option>
+            <option value="Clean">Clean</option>
+            <option value="Dirty">Dirty</option>
+            <option value="Healthy">Healthy</option>
+            <option value="Sick">Sick</option>
+            <option value="Strong">Strong</option>
+            <option value="Weak">Weak</option>
+            <option value="Safe">Safe</option>
+            <option value="Dangerous">Dangerous</option>
+            <option value="Rich">Rich</option>
+            <option value="Poor">Poor</option>
+            <option value="Deep">Deep</option>
+            <option value="Shallow">Shallow</option>
+            <option value="Expensive">Expensive</option>
+            <option value="Cheap">Cheap</option>
+            <option value="High">High</option>
+            <option value="Low">Low</option>
+            <option value="Fast">Fast</option>
+            <option value="Slow">Slow</option>
+            <option value="Early">Early</option>
+            <option value="Late">Late</option>
+            <option value="Long">Long</option>
+            <option value="Short">Short</option>
+            <option value="Old">Old</option>
+            <option value="New">New</option>
+            <option value="Good">Good</option>
+            <option value="Bad">Bad</option>
+            <option value="Beautiful">Beautiful</option>
+            <option value="Ugly">Ugly</option>
+            <option value="Happy">Happy</option>
+            <option value="Sad">Sad</option>
+            <option value="Big">Big</option>
+            <option value="Small">Small</option>
+            <option value="Open">Open</option>
+            <option value="Closed">Closed</option>
+            <option value="True">True</option>
+            <option value="False">False</option>
+            <option value="Real">Real</option>
+            <option value="Fake">Fake</option>
+            <option value="Hot">Hot</option>
+            <option value="Cold">Cold</option>
+            <option value="Wet">Wet</option>
+            <option value="Dry">Dry</option>
+            <option value="Clean">Clean</option>
+            <option value="Dirty">Dirty</option>
+            <option value="Easy">Easy</option>
+            <option value="Hard">Hard</option>
+            <option value="Right">Right</option>
+            <option value="Wrong">Wrong</option>
+            <option value="Clear">Clear</option>
+            <option value="Cloudy">Cloudy</option>
+            <option value="Bright">Bright</option>
+            <option value="Dark">Dark</option>
+            <option value="Loud">Loud</option>
+            <option value="Quiet">Quiet</option>
+            <option value="Heavy">Heavy</option>
+            <option value="Light">Light</option>
+            <option value="Thick">Thick</option>
+            <option value="Thin">Thin</option>
+            <option value="Wide">Wide</option>
+            <option value="Narrow">Narrow</option>
+            <option value="Deep">Deep</option>
+            <option value="Shallow">Shallow</option>
+            <option value="Rich">Rich</option>
+            <option value="Poor">Poor</option>
+            <option value="Old">Old</option>
+            <option value="Young">Young</option>
+            <option value="Sharp">Sharp</option>
+            <option value="Dull">Dull</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Rough">Rough</option>
+            <option value="Sweet">Sweet</option>
+            <option value="Sour">Sour</option>
+            <option value="Soft">Soft</option>
+            <option value="Hard">Hard</option>
+            <option value="Full">Full</option>
+            <option value="Empty">Empty</option>
+            <option value="Tight">Tight</option>
+            <option value="Loose">Loose</option>
+            <option value="Healthy">Healthy</option>
+            <option value="Ill">Ill</option>
+            <option value="Strong">Strong</option>
+            <option value="Weak">Weak</option>
+            <option value="Rich">Rich</option>
+            <option value="Poor">Poor</option>
+            <option value="High">High</option>
+            <option value="Low">Low</option>
+            <option value="Broad">Broad</option>
+            <option value="Narrow">Narrow</option>
+            <option value="Smart">Smart</option>
+            <option value="Stupid">Stupid</option>
+            <option value="Kind">Kind</option>
+            <option value="Mean">Mean</option>
+            <option value="Brave">Brave</option>
+            <option value="Cowardly">Cowardly</option>
+            <option value="Honest">Honest</option>
+            <option value="Dishonest">Dishonest</option>
+            <option value="Polite">Polite</option>
+            <option value="Rude">Rude</option>
+            <option value="Generous">Generous</option>
+            <option value="Selfish">Selfish</option>
+            <option value="Patient">Patient</option>
+            <option value="Impatient">Impatient</option>
+            <option value="Calm">Calm</option>
+            <option value="Nervous">Nervous</option>
+            <option value="Confident">Confident</option>
+            <option value="Shy">Shy</option>
+            <option value="Cheerful">Cheerful</option>
+            <option value="Miserable">Miserable</option>
+            <option value="Funny">Funny</option>
+            <option value="Serious">Serious</option>
+            <option value="Interesting">Interesting</option>
+            <option value="Boring">Boring</option>
+            <option value="Simple">Simple</option>
+            <option value="Complex">Complex</option>
+            <option value="Modern">Modern</option>
+            <option value="Ancient">Ancient</option>
+            <option value="Natural">Natural</option>
+            <option value="Artificial">Artificial</option>
+            <option value="Common">Common</option>
+            <option value="Rare">Rare</option>
+            <option value="Perfect">Perfect</option>
+            <option value="Useless">Useless</option>
+            <option value="Useful">Useful</option>
+            <option value="Available">Available</option>
+            <option value="Occupied">Occupied</option>
+            <option value="Ready">Ready</option>
+            <option value="Finished">Finished</option>
+            <option value="Starting">Starting</option>
+            <option value="Growing">Growing</option>
+            <option value="Shrinking">Shrinking</option>
+            <option value="Living">Living</option>
+            <option value="Dead">Dead</option>
+            <option value="Sleeping">Sleeping</option>
+            <option value="Awake">Awake</option>
+            <option value="Moving">Moving</option>
+            <option value="Still">Still</option>
+            <option value="Flying">Flying</option>
+            <option value="Falling">Falling</option>
+            <option value="Burning">Burning</option>
+            <option value="Freezing">Freezing</option>
+            <option value="Melting">Melting</option>
+            <option value="Exploding">Exploding</option>
+            <option value="Glowing">Glowing</option>
+            <option value="Shining">Shining</option>
+            <option value="Fading">Fading</option>
+            <option value="Broken">Broken</option>
+            <option value="Working">Working</option>
+            <option value="Missing">Missing</option>
+            <option value="Found">Found</option>
+            <option value="Lost">Lost</option>
+            <option value="Hidden">Hidden</option>
+            <option value="Public">Public</option>
+            <option value="Private">Private</option>
+            <option value="Secret">Secret</option>
+            <option value="Famous">Famous</option>
+            <option value="Unknown">Unknown</option>
+            <option value="Favorite">Favorite</option>
+            <option value="Hated">Hated</option>
+            <option value="Wanted">Wanted</option>
+            <option value="Needed">Needed</option>
+            <option value="Enough">Enough</option>
+            <option value="Missing">Missing</option>
+            <option value="Extra">Extra</option>
+            <option value="All">All</option>
+            <option value="None">None</option>
+            <option value="Some">Some</option>
+            <option value="Most">Most</option>
+            <option value="Half">Half</option>
+            <option value="Double">Double</option>
+            <option value="Single">Single</option>
+            <option value="Multiple">Multiple</option>
+            <option value="First">First</option>
+            <option value="Last">Last</option>
+            <option value="Next">Next</option>
+            <option value="Previous">Previous</option>
+            <option value="Only">Only</option>
+            <option value="Together">Together</option>
+            <option value="Separate">Separate</option>
+            <option value="Fast">Fast</option>
+            <option value="Slow">Slow</option>
+            <option value="Now">Now</option>
+            <option value="Then">Then</option>
+            <option value="Soon">Soon</option>
+            <option value="Later">Later</option>
+            <option value="Today">Today</option>
+            <option value="Yesterday">Yesterday</option>
+            <option value="Tomorrow">Tomorrow</option>
+            <option value="Always">Always</option>
+            <option value="Never">Never</option>
+            <option value="Everywhere">Everywhere</option>
+            <option value="Nowhere">Nowhere</option>
+            <option value="Here">Here</option>
+            <option value="There">There</option>
+            <option value="Inside">Inside</option>
+            <option value="Outside">Outside</option>
+            <option value="Above">Above</option>
+            <option value="Below">Below</option>
+            <option value="Near">Near</option>
+            <option value="Far">Far</option>
+            <option value="Beside">Beside</option>
+            <option value="Between">Between</option>
+            <option value="Against">Against</option>
+            <option value="Across">Across</option>
+            <option value="Through">Through</option>
+            <option value="Around">Around</option>
+            <option value="Towards">Towards</option>
+            <option value="Away">Away</option>
+            <option value="Up">Up</option>
+            <option value="Down">Down</option>
+            <option value="Left">Left</option>
+            <option value="Right">Right</option>
+            <option value="Back">Back</option>
+            <option value="Forward">Forward</option>
+            <option value="Sideways">Sideways</option>
+            <option value="Straight">Straight</option>
+            <option value="Crooked">Crooked</option>
+            <option value="Round">Round</option>
+            <option value="Square">Square</option>
+            <option value="Flat">Flat</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Rough">Rough</option>
+            <option value="Sharp">Sharp</option>
+            <option value="Blunt">Blunt</option>
+            <option value="Pointy">Pointy</option>
+            <option value="Hollow">Hollow</option>
+            <option value="Solid">Solid</option>
+            <option value="Soft">Soft</option>
+            <option value="Hard">Hard</option>
+            <option value="Elastic">Elastic</option>
+            <option value="Brittle">Brittle</option>
+            <option value="Liquid">Liquid</option>
+            <option value="Gas">Gas</option>
+            <option value="Solid">Solid</option>
+            <option value="Hot">Hot</option>
+            <option value="Cold">Cold</option>
+            <option value="Warm">Warm</option>
+            <option value="Cool">Cool</option>
+            <option value="Freezing">Freezing</option>
+            <option value="Boiling">Boiling</option>
+            <option value="Flammable">Flammable</option>
+            <option value="Explosive">Explosive</option>
+            <option value="Radioactive">Radioactive</option>
+            <option value="Toxic">Toxic</option>
+            <option value="Safe">Safe</option>
+            <option value="Poisonous">Poisonous</option>
+            <option value="Healthy">Healthy</option>
+            <option value="Delicious">Delicious</option>
+            <option value="Disgusting">Disgusting</option>
+            <option value="Sweet">Sweet</option>
+            <option value="Salty">Salty</option>
+            <option value="Sour">Sour</option>
+            <option value="Bitter">Bitter</option>
+            <option value="Spicy">Spicy</option>
+            <option value="Bland">Bland</option>
+            <option value="Fresh">Fresh</option>
+            <option value="Rotten">Rotten</option>
+            <option value="Cooked">Cooked</option>
+            <option value="Raw">Raw</option>
+            <option value="Hungry">Hungry</option>
+            <option value="Thirsty">Thirsty</option>
+            <option value="Full">Full</option>
+            <option value="Empty">Empty</option>
+            <option value="Clean">Clean</option>
+            <option value="Dirty">Dirty</option>
+            <option value="Neat">Neat</option>
+            <option value="Messy">Messy</option>
+            <option value="Tidy">Tidy</option>
+            <option value="Untidy">Untidy</option>
+            <option value="Polished">Polished</option>
+            <option value="Dusty">Dusty</option>
+            <option value="Sticky">Sticky</option>
+            <option value="Slippery">Slippery</option>
+            <option value="Wet">Wet</option>
+            <option value="Dry">Dry</option>
+            <option value="Soft">Soft</option>
+            <option value="Hard">Hard</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Rough">Rough</option>
+            <option value="Heavy">Heavy</option>
+            <option value="Light">Light</option>
+            <option value="Bright">Bright</option>
+            <option value="Dim">Dim</option>
+            <option value="Dark">Dark</option>
+            <option value="Colorful">Colorful</option>
+            <option value="Plain">Plain</option>
+            <option value="Striped">Striped</option>
+            <option value="Spotted">Spotted</option>
+            <option value="Checkered">Checkered</option>
+            <option value="Flowery">Flowery</option>
+            <option value="Shiny">Shiny</option>
+            <option value="Matt">Matt</option>
+            <option value="Transparent">Transparent</option>
+            <option value="Opaque">Opaque</option>
+            <option value="Solid">Solid</option>
+            <option value="Hollow">Hollow</option>
+            <option value="Deep">Deep</option>
+            <option value="Shallow">Shallow</option>
+            <option value="Wide">Wide</option>
+            <option value="Narrow">Narrow</option>
+            <option value="Broad">Broad</option>
+            <option value="Thin">Thin</option>
+            <option value="Thick">Thick</option>
+            <option value="Fat">Fat</option>
+            <option value="Slim">Slim</option>
+            <option value="Skinny">Skinny</option>
+            <option value="Large">Large</option>
+            <option value="Huge">Huge</option>
+            <option value="Tiny">Tiny</option>
+            <option value="Miniature">Miniature</option>
+            <option value="Giant">Giant</option>
+            <option value="Long">Long</option>
+            <option value="Short">Short</option>
+            <option value="Tall">Tall</option>
+            <option value="Short">Short</option>
+            <option value="High">High</option>
+            <option value="Low">Low</option>
+            <option value="Loud">Loud</option>
+            <option value="Quiet">Quiet</option>
+            <option value="Silent">Silent</option>
+            <option value="Noisy">Noisy</option>
+            <option value="Musical">Musical</option>
+            <option value="Rhythmic">Rhythmic</option>
+            <option value="Fast">Fast</option>
+            <option value="Slow">Slow</option>
+            <option value="Rapid">Rapid</option>
+            <option value="Gradual">Gradual</option>
+            <option value="Sudden">Sudden</option>
+            <option value="Constant">Constant</option>
+            <option value="Frequent">Frequent</option>
+            <option value="Occasional">Occasional</option>
+            <option value="Rare">Rare</option>
+            <option value="Periodic">Periodic</option>
+            <option value="Daily">Daily</option>
+            <option value="Weekly">Weekly</option>
+            <option value="Monthly">Monthly</option>
+            <option value="Yearly">Yearly</option>
+            <option value="Ancient">Ancient</option>
+            <option value="Old">Old</option>
+            <option value="Modern">Modern</option>
+            <option value="Future">Future</option>
+            <option value="Recent">Recent</option>
+            <option value="Early">Early</option>
+            <option value="Late">Late</option>
+            <option value="Timely">Timely</option>
+            <option value="Overdue">Overdue</option>
+            <option value="Eternal">Eternal</option>
+            <option value="Temporary">Temporary</option>
+            <option value="Permanent">Permanent</option>
+            <option value="Brief">Brief</option>
+            <option value="Lasting">Lasting</option>
+            <option value="Infinite">Infinite</option>
+            <option value="Finite">Finite</option>
+            <option value="Deadly">Deadly</option>
+            <option value="Vital">Vital</option>
+            <option value="Living">Living</option>
+            <option value="Organic">Organic</option>
+            <option value="Inorganic">Inorganic</option>
+            <option value="Natural">Natural</option>
+            <option value="Artificial">Artificial</option>
+            <option value="Synthetic">Synthetic</option>
+            <option value="Pure">Pure</option>
+            <option value="Mixed">Mixed</option>
+            <option value="Contaminated">Contaminated</option>
+            <option value="Clean">Clean</option>
+            <option value="Fresh">Fresh</option>
+            <option value="Stale">Stale</option>
+            <option value="Polluted">Polluted</option>
+            <option value="Strong">Strong</option>
+            <option value="Powerful">Powerful</option>
+            <option value="Weak">Weak</option>
+            <option value="Fragile">Fragile</option>
+            <option value="Tough">Tough</option>
+            <option value="Hardy">Hardy</option>
+            <option value="Delicate">Delicate</option>
+            <option value="Sturdy">Sturdy</option>
+            <option value="Sharp">Sharp</option>
+            <option value="Dull">Dull</option>
+            <option value="Pointed">Pointed</option>
+            <option value="Blunt">Blunt</option>
+            <option value="Jagged">Jagged</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Slippery">Slippery</option>
+            <option value="Sticky">Sticky</option>
+            <option value="Oily">Oily</option>
+            <option value="Greasy">Greasy</option>
+            <option value="Dry">Dry</option>
+            <option value="Wet">Wet</option>
+            <option value="Damp">Damp</option>
+            <option value="Soaked">Soaked</option>
+            <option value="Flooded">Flooded</option>
+            <option value="Parched">Parched</option>
+            <option value="Sandy">Sandy</option>
+            <option value="Rocky">Rocky</option>
+            <option value="Muddy">Muddy</option>
+            <option value="Dusty">Dusty</option>
+            <option value="Grassy">Grassy</option>
+            <option value="Woody">Woody</option>
+            <option value="Metallic">Metallic</option>
+            <option value="Plastic">Plastic</option>
+            <option value="Glassy">Glassy</option>
+            <option value="Rubbery">Rubbery</option>
+            <option value="Soft">Soft</option>
+            <option value="Hard">Hard</option>
+            <option value="Firm">Firm</option>
+            <option value="Solid">Solid</option>
+            <option value="Hollow">Hollow</option>
+            <option value="Dense">Dense</option>
+            <option value="Light">Light</option>
+            <option value="Heavier">Heavier</option>
+            <option value="Floaty">Floaty</option>
+            <option value="Sinking">Sinking</option>
+            <option value="Fast">Fast</option>
+            <option value="Quick">Quick</option>
+            <option value="Slow">Slow</option>
+            <option value="Leisurely">Leisurely</option>
+            <option value="Active">Active</option>
+            <option value="Passive">Passive</option>
+            <option value="Busy">Busy</option>
+            <option value="Idle">Idle</option>
+            <option value="Productive">Productive</option>
+            <option value="Lazy">Lazy</option>
+            <option value="Hardworking">Hardworking</option>
+            <option value="Successful">Successful</option>
+            <option value="Unsuccessful">Unsuccessful</option>
+            <option value="Famous">Famous</option>
+            <option value="Obscure">Obscure</option>
+            <option value="Popular">Popular</option>
+            <option value="Unpopular">Unpopular</option>
+            <option value="Trendy">Trendy</option>
+            <option value="Old-fashioned">Old-fashioned</option>
+            <option value="Modern">Modern</option>
+            <option value="Traditional">Traditional</option>
+            <option value="Innovative">Innovative</option>
+            <option value="Creative">Creative</option>
+            <option value="Artistic">Artistic</option>
+            <option value="Scientific">Scientific</option>
+            <option value="Logical">Logical</option>
+            <option value="Emotional">Emotional</option>
+            <option value="Rational">Rational</option>
+            <option value="Irrational">Irrational</option>
+            <option value="Wise">Wise</option>
+            <option value="Foolish">Foolish</option>
+            <option value="Smart">Smart</option>
+            <option value="Clever">Clever</option>
+            <option value="Dull">Dull</option>
+            <option value="Ignorant">Ignorant</option>
+            <option value="Educated">Educated</option>
+            <option value="Uneducated">Uneducated</option>
+            <option value="Skilled">Skilled</option>
+            <option value="Unskilled">Unskilled</option>
+            <option value="Talented">Talented</option>
+            <option value="Gifted">Gifted</option>
+            <option value="Average">Average</option>
+            <option value="Exceptional">Exceptional</option>
+            <option value="Normal">Normal</option>
+            <option value="Strange">Strange</option>
+            <option value="Odd">Odd</option>
+            <option value="Weird">Weird</option>
+            <option value="Unique">Unique</option>
+            <option value="Ordinary">Ordinary</option>
+            <option value="Special">Special</option>
+            <option value="Rare">Rare</option>
+            <option value="Common">Common</option>
+            <option value="Universal">Universal</option>
+            <option value="Local">Local</option>
+            <option value="Global">Global</option>
+            <option value="International">International</option>
+            <option value="National">National</option>
+            <option value="Private">Private</option>
+            <option value="Public">Public</option>
+            <option value="Personal">Personal</option>
+            <option value="Official">Official</option>
+            <option value="Legal">Legal</option>
+            <option value="Illegal">Illegal</option>
+            <option value="Moral">Moral</option>
+            <option value="Immoral">Immoral</option>
+            <option value="Ethical">Ethical</option>
+            <option value="Unethical">Unethical</option>
+            <option value="Fair">Fair</option>
+            <option value="Unfair">Unfair</option>
+            <option value="Just">Just</option>
+            <option value="Unjust">Unjust</option>
+            <option value="Equal">Equal</option>
+            <option value="Unequal">Unequal</option>
+            <option value="Free">Free</option>
+            <option value="Captive">Captive</option>
+            <option value="Independent">Independent</option>
+            <option value="Dependent">Dependent</option>
+            <option value="Safe">Safe</option>
+            <option value="Dangerous">Dangerous</option>
+            <option value="Secure">Secure</option>
+            <option value="Insecure">Insecure</option>
+            <option value="Vulnerable">Vulnerable</option>
+            <option value="Protected">Protected</option>
+            <option value="Strong">Strong</option>
+            <option value="Weak">Weak</option>
+            <option value="Tough">Tough</option>
+            <option value="Soft">Soft</option>
+            <option value="Gentle">Gentle</option>
+            <option value="Fierce">Fierce</option>
+            <option value="Wild">Wild</option>
+            <option value="Tame">Tame</option>
+            <option value="Domestic">Domestic</option>
+            <option value="Foreign">Foreign</option>
+            <option value="Strange">Strange</option>
+            <option value="Familiar">Familiar</option>
+            <option value="Known">Known</option>
+            <option value="Unknown">Unknown</option>
+            <option value="Clear">Clear</option>
+            <option value="Vague">Vague</option>
+            <option value="Definite">Definite</option>
+            <option value="Indefinite">Indefinite</option>
+            <option value="Certain">Certain</option>
+            <option value="Doubtful">Doubtful</option>
+            <option value="Possible">Possible</option>
+            <option value="Impossible">Impossible</option>
+            <option value="Likely">Likely</option>
+            <option value="Unlikely">Unlikely</option>
+            <option value="True">True</option>
+            <option value="False">False</option>
+            <option value="Fact">Fact</option>
+            <option value="Fiction">Fiction</option>
+            <option value="Real">Real</option>
+            <option value="Imaginary">Imaginary</option>
+            <option value="Actual">Actual</option>
+            <option value="Potential">Potential</option>
+            <option value="Visible">Visible</option>
+            <option value="Invisible">Invisible</option>
+            <option value="Audible">Audible</option>
+            <option value="Inaudible">Inaudible</option>
+            <option value="Tangible">Tangible</option>
+            <option value="Intangible">Intangible</option>
+            <option value="Abstract">Abstract</option>
+            <option value="Concrete">Concrete</option>
+            <option value="Simple">Simple</option>
+            <option value="Complex">Complex</option>
+            <option value="Easy">Easy</option>
+            <option value="Difficult">Difficult</option>
+            <option value="Direct">Direct</option>
+            <option value="Indirect">Indirect</option>
+            <option value="Straight">Straight</option>
+            <option value="Curved">Curved</option>
+            <option value="Right">Right</option>
+            <option value="Wrong">Wrong</option>
+            <option value="Correct">Correct</option>
+            <option value="Incorrect">Incorrect</option>
+            <option value="Accurate">Accurate</option>
+            <option value="Inaccurate">Inaccurate</option>
+            <option value="Precise">Precise</option>
+            <option value="Vague">Vague</option>
+            <option value="Complete">Complete</option>
+            <option value="Incomplete">Incomplete</option>
+            <option value="Perfect">Perfect</option>
+            <option value="Imperfect">Imperfect</option>
+            <option value="Total">Total</option>
+            <option value="Partial">Partial</option>
+            <option value="Whole">Whole</option>
+            <option value="Fragmented">Fragmented</option>
+            <option value="Broken">Broken</option>
+            <option value="Intact">Intact</option>
+            <option value="Solid">Solid</option>
+            <option value="Liquid">Liquid</option>
+            <option value="Gas">Gas</option>
+            <option value="Plasma">Plasma</option>
+            <option value="Hard">Hard</option>
+            <option value="Soft">Soft</option>
+            <option value="Heavy">Heavy</option>
+            <option value="Light">Light</option>
+            <option value="Hot">Hot</option>
+            <option value="Cold">Cold</option>
+            <option value="Warm">Warm</option>
+            <option value="Cool">Cool</option>
+            <option value="Dry">Dry</option>
+            <option value="Wet">Wet</option>
+            <option value="Clean">Clean</option>
+            <option value="Dirty">Dirty</option>
+            <option value="Empty">Empty</option>
+            <option value="Full">Full</option>
+            <option value="Open">Open</option>
+            <option value="Closed">Closed</option>
+            <option value="Fast">Fast</option>
+            <option value="Slow">Slow</option>
+            <option value="Early">Early</option>
+            <option value="Late">Late</option>
+            <option value="Young">Young</option>
+            <option value="Old">Old</option>
+            <option value="New">New</option>
+            <option value="Old">Old</option>
+            <option value="Good">Good</option>
+            <option value="Bad">Bad</option>
+            <option value="Better">Better</option>
+            <option value="Worse">Worse</option>
+            <option value="Best">Best</option>
+            <option value="Worst">Worst</option>
+            <option value="First">First</option>
+            <option value="Last">Last</option>
+            <option value="High">High</option>
+            <option value="Low">Low</option>
+            <option value="Near">Near</option>
+            <option value="Far">Far</option>
+            <option value="Big">Big</option>
+            <option value="Small">Small</option>
+            <option value="Wide">Wide</option>
+            <option value="Narrow">Narrow</option>
+            <option value="Long">Long</option>
+            <option value="Short">Short</option>
+            <option value="Thick">Thick</option>
+            <option value="Thin">Thin</option>
+            <option value="Deep">Deep</option>
+            <option value="Shallow">Shallow</option>
+            <option value="Rich">Rich</option>
+            <option value="Poor">Poor</option>
+            <option value="Strong">Strong</option>
+            <option value="Weak">Weak</option>
+            <option value="Safe">Safe</option>
+            <option value="Dangerous">Dangerous</option>
+            <option value="True">True</option>
+            <option value="False">False</option>
+            <option value="Beautiful">Beautiful</option>
+            <option value="Ugly">Ugly</option>
+            <option value="Happy">Happy</option>
+            <option value="Sad">Sad</option>
+            <option value="Angry">Angry</option>
+            <option value="Calm">Calm</option>
+            <option value="Scared">Scared</option>
+            <option value="Brave">Brave</option>
+            <option value="Shy">Shy</option>
+            <option value="Bold">Bold</option>
+            <option value="Smart">Smart</option>
+            <option value="Dull">Dull</option>
+            <option value="Kind">Kind</option>
+            <option value="Mean">Mean</option>
+            <option value="Polite">Polite</option>
+            <option value="Rude">Rude</option>
+            <option value="Generous">Generous</option>
+            <option value="Selfish">Selfish</option>
+            <option value="Honest">Honest</option>
+            <option value="Dishonest">Dishonest</option>
+            <option value="Fair">Fair</option>
+            <option value="Unfair">Unfair</option>
+            <option value="Free">Free</option>
+            <option value="Busy">Busy</option>
+            <option value="Early">Early</option>
+            <option value="Late">Late</option>
+            <option value="Cheap">Cheap</option>
+            <option value="Expensive">Expensive</option>
+            <option value="Quiet">Quiet</option>
+            <option value="Loud">Loud</option>
+            <option value="Soft">Soft</option>
+            <option value="Hard">Hard</option>
+            <option value="Light">Light</option>
+            <option value="Heavy">Heavy</option>
+            <option value="Easy">Easy</option>
+            <option value="Difficult">Difficult</option>
+            <option value="Smooth">Smooth</option>
+            <option value="Rough">Rough</option>
+            <option value="Flat">Flat</option>
+            <option value="Round">Round</option>
+            <option value="Straight">Straight</option>
+            <option value="Crooked">Crooked</option>
+            <option value="Empty">Empty</option>
+            <option value="Full">Full</option>
+            <option value="Thin">Thin</option>
+            <option value="Thick">Thick</option>
+            <option value="Narrow">Narrow</option>
+            <option value="Wide">Wide</option>
+            <option value="Shallow">Shallow</option>
+            <option value="Deep">Deep</option>
+            <option value="Near">Near</option>
+            <option value="Far">Far</option>
+            <option value="Small">Small</option>
+            <option value="Big">Big</option>
+            <option value="Short">Short</option>
+            <option value="Tall">Tall</option>
+            <option value="Weak">Weak</option>
+            <option value="Strong">Strong</option>
+            <option value="Slow">Slow</option>
+            <option value="Fast">Fast</option>
+            <option value="Bad">Bad</option>
+            <option value="Good">Good</option>
+            <option value="Old">Old</option>
+            <option value="New">New</option>
+            <option value="Cold">Cold</option>
+            <option value="Hot">Hot</option>
+            <option value="Dry">Dry</option>
+            <option value="Wet">Wet</option>
+            <option value="Dark">Dark</option>
+            <option value="Light">Light</option>
+            <option value="Sad">Sad</option>
+            <option value="Happy">Happy</option>
+          </select>
+          </select>
+        </div>
       </div>
-      <div class="field">
-        <label>My Speaking Language (for reading)</label>
-        <select id="speaking-lang-select"></select>
-      </div>
-      <div class="field">
-        <label>Improvement Tone</label>
-        <select id="tone-select"></select>
-      </div>
-      <button class="close-btn" id="close-btn">Close</button>
-    </div>`;
+      <div id="response-box" class="response-box">
+        <div class="box-label original">Original Text</div>
+        <div id="original-text" class="box-content"></div>
+        <div id="action-label" class="box-label action">AI Response</div>
+        <div id="result-text" class="box-content"></div>
+        <div class="box-footer">
+          <button id="btn-apply-res" class="box-btn btn-apply">Apply</button>
+          <button id="btn-copy-res" class="box-btn btn-cancel">Copy</button>
+          <button id="btn-cancel-res" class="box-btn btn-cancel">Close</button>
+        </div>
 
-  document.body.appendChild(host);
-
-  const picker = shadow.getElementById("picker");
-  const langSelect = shadow.getElementById("lang-select");
-  const speakingLangSelect = shadow.getElementById("speaking-lang-select");
-  const toneSelect = shadow.getElementById("tone-select");
-  const closeBtn = shadow.getElementById("close-btn");
-
-  LANGUAGES.forEach(({ code, label }) => {
-    const opt = document.createElement("option");
-    opt.value = code;
-    opt.textContent = label;
-    langSelect.appendChild(opt);
-    
-    const opt2 = document.createElement("option");
-    opt2.value = code;
-    opt2.textContent = label;
-    speakingLangSelect.appendChild(opt2);
-  });
-  TONES.forEach(({ code, label }) => {
-    const opt = document.createElement("option");
-    opt.value = code;
-    opt.textContent = label;
-    toneSelect.appendChild(opt);
-  });
-
-  // Sync state
-  langSelect.value = _lastLang;
-  speakingLangSelect.value = _speakingLang;
-  toneSelect.value = _lastTone;
-
-  langSelect.addEventListener("change", (e) => {
-    _lastLang = e.target.value;
-    chrome.storage.sync.set({ lastLang: _lastLang });
-    updateButtonLabels();
-  });
-
-  speakingLangSelect.addEventListener("change", (e) => {
-    _speakingLang = e.target.value;
-    chrome.storage.sync.set({ speakingLang: _speakingLang });
-  });
-
-  toneSelect.addEventListener("change", (e) => {
-    _lastTone = e.target.value;
-    chrome.storage.sync.set({ lastTone: _lastTone });
-    updateButtonLabels();
-  });
-
-  picker.addEventListener("mousedown", (e) => {
-    // Only prevent default if it's NOT a select element, so dropdowns can open
-    if (e.target.tagName !== 'SELECT') {
-      e.preventDefault();
-    }
-  });
-  closeBtn.addEventListener("click", () => hideSettingsPanel());
-
-  _settingsPanel = { host, shadow, el: picker };
-  return _settingsPanel;
-}
-
-function showSettingsPanel(el) {
-  const p = getSettingsPanel();
-  const { top, left } = positionNear(el, 200, 200);
-  p.el.style.top = `${top}px`;
-  p.el.style.left = `${left}px`;
-
-  // Sync the selects in case they were updated
-  p.shadow.getElementById("lang-select").value = _lastLang;
-  p.shadow.getElementById("tone-select").value = _lastTone;
-
-  p.el.classList.add("visible");
-}
-
-function hideSettingsPanel() {
-  _settingsPanel?.el.classList.remove("visible");
-}
-
-// ─── Translate Selected Message Logic ─────────────────────────────────────────
-function translateSelectedText(el) {
-  const selection = window.getSelection().toString().trim();
-  if (!selection) {
-    showBarToast("Please select some text to translate first.");
-    return;
-  }
-
-  // Check cache first
-  const cacheKey = getCacheKey(`translate:${_lastLang}`, selection);
-  const cachedResult = getCachedResult(cacheKey);
-  if (cachedResult) {
-    const resText = cleanResult(cachedResult, selection);
-    showTranslationPopup(selection, resText, el);
-    return;
-  }
-
-  setBarBusy(true, "translate");
-  _inflight = true;
-
-  const timer = setTimeout(() => {
-    _inflight = false;
-    setBarBusy(false);
-    showBarToast("Translation timed out");
-  }, REQUEST_TIMEOUT_MS);
-
-  try {
-    // Send directly to groq logic but we just need translation result back. We can reuse triggerMode's background call structure.
-    chrome.runtime.sendMessage(
-      {
-        type: "voca:request",
-        mode: "translate",
-        text: selection,
-        tone: "",
-        targetLang: _speakingLang,
-        speakingLang: _speakingLang,
-      },
-      (response) => {
-        clearTimeout(timer);
-        _inflight = false;
-        setBarBusy(false);
-
-        if (chrome.runtime.lastError || !response || response.error) {
-          if (response?.upgradeRequired) {
-            showUpgradePrompt('limit_reached', response);
-          } else {
-            showBarToast(response?.error || "Translation failed");
-          }
-          return;
-        }
-
-        // Cache the result
-        setCachedResult(cacheKey, response.result);
-
-        const resText = cleanResult(response.result, selection);
-        showTranslationPopup(selection, resText, el);
-      },
-    );
-  } catch (err) {
-    clearTimeout(timer);
-    _inflight = false;
-    setBarBusy(false);
-    showBarToast("Extension error");
-  }
-}
-
-function showTranslationPopup(orig, result, el) {
-  const p = getPopup();
-  p.orig.textContent = orig;
-  p.res.textContent = result;
-
-  p.orig.className = "box orig";
-  p.res.className = "box result";
-
-  p.improvedLbl.style.display = "none";
-  p.improvedBox.style.display = "none";
-
-  // Repurpose popup buttons: Just show Close
-  p.btnApply.style.display = "none";
-  p.btnCancel.textContent = "Close";
-
-  // Note: We don't overwrite p.btnCancel.onclick permanently to avoid breaking other modes
-  const originalCancelHandler = p.btnCancel.onclick;
-  p.btnCancel.onclick = () => {
-    closePopup();
-    // Restore defaults for next time
-    p.btnApply.style.display = "inline-block";
-    p.btnCancel.textContent = "Cancel";
-    p.btnCancel.onclick = originalCancelHandler;
-  };
-
-  const { top, left } = positionNear(el, 340, 250);
-  p.el.style.top = `${top}px`;
-  p.el.style.left = `${left}px`;
-  p.el.classList.add("visible");
-}
-
-// ─── Result popup (Shadow DOM) ────────────────────────────────────────────────
-let _popup = null;
-
-function getPopup() {
-  if (_popup) return _popup;
-
-  const host = document.createElement("div");
-  Object.assign(host.style, {
-    position: "fixed",
-    top: "0",
-    left: "0",
-    width: "0",
-    height: "0",
-    overflow: "visible",
-    pointerEvents: "none",
-    zIndex: "2147483647",
-  });
-
-  const shadow = host.attachShadow({ mode: "closed" });
-  shadow.innerHTML = `
-    <style>
-      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      .popup {
-        display: none; position: fixed; pointer-events: auto;
-        width: 340px; 
-        background: rgba(19, 19, 19, 0.9); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,.5);
-        padding: 18px;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      }
-      .popup.visible { display: block; }
-      .label {
-        font-size: 11px; font-weight: 600; color: #a1a1aa;
-        text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px;
-      }
-      .box {
-        font-size: 13px; line-height: 1.55; padding: 10px 12px;
-        border-radius: 10px; margin-bottom: 14px;
-        max-height: 120px; overflow-y: auto; word-break: break-word;
-        user-select: text !important;
-        -webkit-user-select: text !important;
-        cursor: text;
-      }
-      .orig   { background: rgba(255, 255, 255, 0.05); color: #a1a1aa; border: 1px solid rgba(255, 255, 255, 0.05); }
-      .result { background: rgba(0, 122, 255, 0.1); color: #93c5fd; border: 1px solid rgba(0, 122, 255, 0.15); }
-      .improved { background: rgba(0, 122, 255, 0.08); color: #e4e4e7; border: 1px solid rgba(0, 122, 255, 0.1); }
-      .actions { display: flex; gap: 10px; justify-content: flex-end; }
-      .btn {
-        padding: 8px 20px; border: none; border-radius: 9999px;
-        font-size: 13px; font-weight: 600; cursor: pointer;
-        transition: all 0.2s; outline: none;
-      }
-      .apply  { 
-        background: linear-gradient(135deg, #007AFF, #005bc1); 
-        color: #fff; box-shadow: 0 0 12px rgba(0, 122, 255, 0.3);
-      }
-      .apply:hover  { filter: brightness(1.15); transform: scale(1.03); }
-      .cancel { background: rgba(255, 255, 255, 0.08); color: #a1a1aa; }
-      .cancel:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
-    </style>
-    <div class="popup" id="popup">
-      <div class="label">Original</div>
-      <div class="box orig"   id="orig"></div>
-      
-      <div class="label" id="lbl-improved" style="display:none;">Improved</div>
-      <div class="box improved" id="improved" style="display:none;"></div>
-      
-      <div class="label">Result</div>
-      <div class="box result" id="res"></div>
-      <div class="actions">
-        <button class="btn cancel" id="btn-cancel">Cancel</button>
-        <button class="btn apply"  id="btn-apply">Apply</button>
-      </div>
-    </div>`;
-
-  document.body.appendChild(host);
-
-  _popup = {
-    host,
-    shadow,
-    el: shadow.getElementById("popup"),
-    orig: shadow.getElementById("orig"),
-    improvedLbl: shadow.getElementById("lbl-improved"),
-    improvedBox: shadow.getElementById("improved"),
-    res: shadow.getElementById("res"),
-    btnApply: shadow.getElementById("btn-apply"),
-    btnCancel: shadow.getElementById("btn-cancel"),
-    targetEl: null,
-  };
-
-  _popup.el.addEventListener("mousedown", (e) => {
-    // Only prevent default if clicking a button to avoid focus loss
-    // DON'T prevent default on the text boxes so they stay selectable
-    if (e.target.tagName === 'BUTTON') {
-      e.preventDefault();
-    }
-  });
-
-  _popup.btnCancel.onclick = closePopup;
-  return _popup;
-}
-
-function showPopup(
-  targetEl,
-  original,
-  result,
-  isSelection,
-  improvedText = null,
-) {
-  const p = getPopup();
-  p.targetEl = targetEl;
-  p.orig.textContent = original;
-  p.res.textContent = result;
-  
-  // Ensure buttons are reset (in case showTranslationPopup hid them)
-  p.btnApply.style.display = "inline-block";
-  p.btnCancel.style.display = "inline-block";
-  p.btnCancel.textContent = "Cancel";
-  p.btnCancel.onclick = closePopup;
-
-  if (improvedText) {
-    p.improvedLbl.style.display = "block";
-    p.improvedBox.style.display = "block";
-    p.improvedBox.textContent = improvedText;
-  } else {
-    p.improvedLbl.style.display = "none";
-    p.improvedBox.style.display = "none";
-  }
-
-  const rect = targetEl.getBoundingClientRect();
-  // Default to above the input element
-  let top = rect.top - (improvedText ? 380 : 270) - OFFSET_Y;
-  let left = rect.left;
-  // If it goes off the top of the screen, place it below instead
-  if (top < 8) top = rect.bottom + OFFSET_Y;
-  if (left + 340 > window.innerWidth)
-    left = Math.max(8, window.innerWidth - 348);
-  p.el.style.top = `${top}px`;
-  p.el.style.left = `${left}px`;
-  p.el.classList.add("visible");
-
-  p.btnApply.onclick = () => {
-    applyText(targetEl, result, isSelection);
-    closePopup();
-    hideBar();
-  };
-}
-
-function closePopup() {
-  _popup?.el.classList.remove("visible");
-}
-
-// ─── AI request ───────────────────────────────────────────────────────────────
-// AI is only ever invoked from explicit button clicks below — never on typing.
-function triggerMode(el, mode, targetLang = "", tone = "") {
-  if (_inflight) return; // in-flight guard — blocks multiple rapid clicks
-
-  const selText = window.getSelection().toString().trim();
-  const fullText = getText(el).trim();
-  const isSelection = selText.length > 0;
-
-  const textToProcess = isSelection ? selText : fullText;
-
-  if (textToProcess.length <= MIN_LENGTH) return;
-  if (textToProcess.length > MAX_LENGTH) {
-    showBarToast(`Text too long — max ${MAX_LENGTH} chars`);
-    return;
-  }
-
-  // Check cache first (reduces API calls for repeated text/mode combinations)
-  const cacheKey = getCacheKey(mode + (targetLang || '') + (tone || ''), textToProcess);
-  const cachedResult = getCachedResult(cacheKey);
-  if (cachedResult) {
-    // Use cached result instantly
-    const clean = cleanResult(cachedResult, textToProcess);
-    showPopup(el, textToProcess, clean, isSelection);
-    return;
-  }
-
-  // Check if same request is already pending (deduplication)
-  if (_pendingRequests.has(cacheKey)) {
-    // Add callback to pending list
-    _pendingRequests.get(cacheKey).push((result) => {
-      const clean = cleanResult(result, textToProcess);
-      showPopup(el, textToProcess, clean, isSelection);
-    });
-    return;
-  }
-
-  // Mark as pending
-  _pendingRequests.set(cacheKey, []);
-
-  _inflight = true;
-  hideSettingsPanel();
-  showBar(el); // keep bar visible
-  setBarBusy(true, mode); // spinner on the active button
-
-  let settled = false;
-  const finish = (errMsg) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    _inflight = false;
-    setBarBusy(false);
-    if (errMsg) {
-      showBarToast(String(errMsg));
-      // Clean up pending requests on error
-      _pendingRequests.delete(cacheKey);
-    }
-  };
-
-  // Soft timeout — re-enables UI even if the message channel never returns
-  const timer = setTimeout(
-    () => finish("Request timed out"),
-    REQUEST_TIMEOUT_MS,
-  );
-
-  try {
-    chrome.runtime.sendMessage(
-      {
-        type: "voca:request",
-        mode,
-        text: textToProcess,
-        targetLang,
-        tone,
-        speakingLang: _speakingLang,
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          finish(chrome.runtime.lastError.message || "Request failed");
-          return;
-        }
-        if (!response) {
-          finish("No response");
-          return;
-        }
-        if (response.error) {
-          finish();
-          // Check if upgrade is required
-          if (response.upgradeRequired) {
-            showUpgradePrompt(response.remaining === 0 ? 'limit_reached' : 'low_credits', response);
-          } else {
-            showBarToast(response.error);
-          }
-          return;
-        }
-        finish();
-
-        let resultData = response.result;
-        resultData = cleanResult(resultData, textToProcess);
-        if (!resultData) {
-          showBarToast("Empty response");
-          return;
-        }
-        if (resultData === textToProcess) {
-          showBarToast("No changes needed");
-          return;
-        }
-
-        // Cache the successful result
-        setCachedResult(cacheKey, response.result);
-
-        // Notify any pending requests with same key (deduplication)
-        const pendingCallbacks = _pendingRequests.get(cacheKey);
-        if (pendingCallbacks) {
-          pendingCallbacks.forEach(cb => cb(response.result));
-          _pendingRequests.delete(cacheKey);
-        }
-
-        showPopup(el, textToProcess, resultData, isSelection, null);
-      },
-    );
-  } catch (err) {
-    if (err.message.includes("Extension context invalidated")) {
-      alert(
-        "Voca Extension was updated! Please refresh the page to continue using it.",
-      );
-      finish();
-      return;
-    }
-    finish(err.message || "Extension error");
-  }
-}
-
-// Strip wrapping quotes / common preambles the model sometimes adds despite instructions
-function cleanResult(raw, fallback) {
-  let r = String(raw ?? fallback ?? "").trim();
-  // Drop a leading "Here is ...:" / "Corrected text:" style preamble on the first line, as well as "Language:" prefixes
-  r = r.replace(
-    /^(here(?:'s| is)[^:\n]{0,60}:|corrected(?: text)?:|translation:|rewritten(?: text)?:|(?:english|spanish|french|german|deutsch|italian|portuguese|hindi|thai|chinese|japanese|korean|arabic|russian):\s*)\s*/i,
-    "",
-  );
-  // Drop matching wrapping quotes (straight, curly, guillemets, backticks)
-  const quotes = [
-    '"',
-    "'",
-    "`",
-    "\u201C\u201D",
-    "\u2018\u2019",
-    "\u00AB\u00BB",
-  ];
-  for (const pair of quotes) {
-    const open = pair[0],
-      close = pair[pair.length - 1];
-    if (r.length >= 2 && r.startsWith(open) && r.endsWith(close)) {
-      r = r.slice(1, -1).trim();
-      break;
-    }
-  }
-  return r;
-}
-
-// ─── Auto Reply ───────────────────────────────────────────────────────────────
-
-// UI noise filters — must be defined before scrapers use them
-const UI_NOISE_EXACT =
-  /^(send|reply|forward|delete|edit|edited|react|more|more actions|type a message|write a message|new message|close|minimize|maximize|maximize compose field|minimize compose field|sponsored|sponsored messaging ad|see translation|translated from|emoji|gif|sticker|attach|attachment|photo|video|voice message|audio|call|video call|today|yesterday|online|offline|typing|recording|seen|delivered|read|sent|status is online|status is offline|status is away|active now|active \d+ .* ago|\d{1,2}:\d{2}(\s?(am|pm))?)$/i;
-const UI_NOISE_CONTAINS =
-  /you are on the messaging overlay|press enter to open the list|compose message you are|messaging you are on|open the list of conversations|start of conversation|end of conversation/i;
-
-function scrapeMessages() {
-  const host = location.hostname;
-
-  // ── Platform-specific scrapers ──
-  const scrapers = [
-    // WhatsApp Web
-    () => {
-      if (!host.includes("web.whatsapp.com")) return null;
-      // WhatsApp wraps each message in elements with these classes
-      const msgs = document.querySelectorAll("div.message-in, div.message-out");
-      if (!msgs.length) return null;
-      const result = [];
-      const arr = Array.from(msgs).slice(-7);
-      for (const m of arr) {
-        const isMe = m.classList.contains("message-out");
-        // Try multiple selectors for the text content
-        let text = "";
-        // Method 1: copyable-text has a data-pre-plain-text attribute
-        const copyable = m.querySelector("[data-pre-plain-text]");
-        if (copyable) {
-          const selectable = copyable.querySelector("span.selectable-text");
-          text =
-            selectable?.innerText?.trim() || copyable.innerText?.trim() || "";
-        }
-        // Method 2: direct selectable-text lookup
-        if (!text) {
-          const selectable = m.querySelector("span.selectable-text");
-          text = selectable?.innerText?.trim() || "";
-        }
-        // Method 3: quoted or plain text span
-        if (!text) {
-          const plain = m.querySelector(
-            'span[dir="ltr"], span[dir="rtl"], span[class]',
-          );
-          text = plain?.innerText?.trim() || "";
-        }
-        if (text && text.length > 1) {
-          result.push({
-            sender: isMe ? "Me" : "Them",
-            text: text.slice(0, 500),
-          });
-        }
-      }
-      return result.length ? result.slice(-5) : null;
-    },
-
-    // LinkedIn Messages
-    () => {
-      if (!host.includes("linkedin.com")) return null;
-
-      // LinkedIn accessibility / UI noise patterns
-      const LI_NOISE =
-        /^(maximize compose field|minimize compose field|sponsored messaging ad|close your conversation|new message|send|type a message|write a message|you and .{0,50} are now connected|see translation|translated from|react|reply|forward|delete|more actions|edited|status is|messaging you are on|compose message|you are on the messaging overlay|press enter to)/i;
-
-      const result = [];
-
-      // Strategy 1: Find message bubbles directly
-      const bubbles = document.querySelectorAll(
-        '.msg-s-event-listitem__message-bubble, [class*="message-bubble"], ' +
-          ".msg-s-message-group__bubble",
-      );
-      if (bubbles.length) {
-        const arr = Array.from(bubbles).slice(-7);
-        for (const bubble of arr) {
-          const paragraphs = bubble.querySelectorAll("p");
-          let text = "";
-          if (paragraphs.length) {
-            text = Array.from(paragraphs)
-              .map((p) => p.innerText?.trim() || "")
-              .filter(Boolean)
-              .join("\n");
-          }
-          if (!text) text = bubble.innerText?.trim() || "";
-          if (!text || text.length < 2 || text.length > 1500) continue;
-          if (LI_NOISE.test(text)) continue;
-
-          // Me/Them: check if the bubble's parent event item is from the current user
-          const eventItem = bubble.closest('[class*="msg-s-event-listitem"]');
-          const isMe = eventItem
-            ? eventItem.classList.toString().includes("--current") ||
-              eventItem.querySelector(
-                '[class*="--current-user"], [class*="current-user"]',
-              ) !== null
-            : false;
-
-          result.push({
-            sender: isMe ? "Me" : "Them",
-            text: text.slice(0, 500),
-          });
-        }
-        if (result.length) return result.slice(-5);
-      }
-
-      // Strategy 2: Find event list items and extract paragraph text from them
-      const events = document.querySelectorAll(
-        '.msg-s-event-listitem, [class*="msg-s-event-listitem"]',
-      );
-      if (events.length) {
-        const arr = Array.from(events).slice(-10);
-        for (const ev of arr) {
-          // Get all paragraphs inside this event
-          const paragraphs = ev.querySelectorAll("p");
-          if (!paragraphs.length) continue;
-
-          let text = Array.from(paragraphs)
-            .map((p) => p.innerText?.trim() || "")
-            .filter((t) => t.length > 1 && !LI_NOISE.test(t))
-            .join("\n");
-
-          if (!text || text.length < 2 || text.length > 1500) continue;
-          if (LI_NOISE.test(text)) continue;
-          // Extra: skip text that contains common accessibility phrases
-          if (
-            /you are on the messaging overlay|press enter to open/i.test(text)
-          )
-            continue;
-
-          const isMe =
-            ev.classList.toString().includes("--current") ||
-            ev.querySelector('[class*="--current-user"]') !== null;
-
-          result.push({
-            sender: isMe ? "Me" : "Them",
-            text: text.slice(0, 500),
-          });
-        }
-        if (result.length) return result.slice(-5);
-      }
-
-      return null;
-    },
-
-    // Instagram DMs
-    () => {
-      if (!host.includes("instagram.com")) return null;
-      const result = [];
-
-      // Strategy 1: role="row" with text containers inside
-      const rows = document.querySelectorAll('[role="row"]');
-      if (rows.length) {
-        const arr = Array.from(rows).slice(-10);
-        for (const row of arr) {
-          // Find text spans/divs (Instagram uses div[dir="auto"] for message text)
-          const textEls = row.querySelectorAll(
-            'div[dir="auto"], span[dir="auto"]',
-          );
-          let best = "";
-          for (const t of textEls) {
-            if (t.closest('button, [role="button"], textarea, nav')) continue;
-            const txt = t.innerText?.trim() || "";
-            if (txt.length > best.length && txt.length < 1500) best = txt;
-          }
-          if (!best || best.length < 2) continue;
-          if (UI_NOISE_EXACT.test(best)) continue;
-
-          // Me/Them detection via CSS alignment
-          const sender = detectSenderByAlignment(row) || "Chat";
-          result.push({ sender, text: best.slice(0, 500) });
-        }
-        const deduped = dedupeMessages(result);
-        if (deduped.length) return deduped.slice(-5);
-      }
-
-      // Strategy 2: Look for message-like containers with dir="auto"
-      const textContainers = document.querySelectorAll(
-        'div[dir="auto"]:not(textarea):not(input)',
-      );
-      if (textContainers.length > 2) {
-        const candidates = [];
-        const seen = new Set();
-        const arr = Array.from(textContainers).slice(-15);
-        for (const el of arr) {
-          if (el.closest('button, [role="button"], nav, header, textarea'))
-            continue;
-          const text = el.innerText?.trim() || "";
-          if (text.length < 2 || text.length > 1500 || seen.has(text)) continue;
-          if (UI_NOISE_EXACT.test(text)) continue;
-          seen.add(text);
-          const sender = detectSenderByAlignment(el) || "Chat";
-          candidates.push({ sender, text: text.slice(0, 500) });
-        }
-        const deduped = dedupeMessages(candidates);
-        if (deduped.length >= 2) return deduped.slice(-5);
-      }
-
-      return null;
-    },
-
-    // Facebook Messenger
-    () => {
-      if (!host.includes("facebook.com") && !host.includes("messenger.com"))
-        return null;
-      const rows = document.querySelectorAll('[role="row"]');
-      if (!rows.length) return null;
-      return extractDeepText(rows);
-    },
-
-    // Telegram Web
-    () => {
-      if (!host.includes("web.telegram.org")) return null;
-      // Telegram K and Telegram A use different structures
-      const msgs = document.querySelectorAll(
-        '.message, .Message, .bubble, [class*="message"][class*="body"]',
-      );
-      if (!msgs.length) return null;
-      return extractDeepText(msgs);
-    },
-
-    // Discord
-    () => {
-      if (!host.includes("discord.com")) return null;
-      const msgs = document.querySelectorAll(
-        '[id^="chat-messages-"] [class*="messageContent"], ' +
-          '[class*="messageContent-"], [role="article"]',
-      );
-      if (!msgs.length) return null;
-      return extractDeepText(msgs);
-    },
-
-    // Slack
-    () => {
-      if (!host.includes("slack.com")) return null;
-      const msgs = document.querySelectorAll(
-        ".c-message__body, .c-message_kit__text, " +
-          '[data-qa="message_content"], .p-rich_text_section',
-      );
-      if (!msgs.length) return null;
-      return extractDeepText(msgs);
-    },
-
-    // Twitter / X DMs
-    () => {
-      if (!host.includes("twitter.com") && !host.includes("x.com")) return null;
-      const msgs = document.querySelectorAll(
-        '[data-testid="messageEntry"] [data-testid="tweetText"], ' +
-          '[data-testid="messageEntry"], [class*="DirectMessage"]',
-      );
-      if (!msgs.length) return null;
-      return extractDeepText(msgs);
-    },
-
-    // Microsoft Teams (web)
-    () => {
-      if (
-        !host.includes("teams.microsoft.com") &&
-        !host.includes("teams.live.com")
-      )
-        return null;
-      const msgs = document.querySelectorAll(
-        '[data-tid="chat-pane-message"], [class*="message-body"], ' +
-          '[role="listitem"][class*="message"]',
-      );
-      if (!msgs.length) return null;
-      return extractDeepText(msgs);
-    },
-
-    // ── Universal deep fallback ──
-    () => {
-      // Strategy 1: look for common chat-related selectors
-      const selectors = [
-        "[data-message-id]",
-        "[data-msg-id]",
-        '[data-testid*="message"]',
-        '[role="row"]',
-        '[role="article"]',
-        '[role="listitem"]',
-        '[class*="message"][class*="body"]',
-        '[class*="message"][class*="content"]',
-        '[class*="bubble"]',
-        '[class*="Bubble"]',
-        '[class*="chat-msg"]',
-        '[class*="msg-body"]',
-      ];
-      for (const sel of selectors) {
-        try {
-          const els = document.querySelectorAll(sel);
-          if (els.length >= 2) {
-            const result = extractDeepText(els);
-            if (result && result.length >= 2) return result;
-          }
-        } catch (_) {}
-      }
-
-      // Strategy 2: find the nearest scrollable ancestor of the active input
-      // and grab leaf-level text blocks from it
-      const activeEl = _bar?.activeEl;
-      if (activeEl) {
-        const scrollParent = findScrollParent(activeEl);
-        if (scrollParent) {
-          const result = extractFromScrollContainer(scrollParent);
-          if (result && result.length >= 1) return result;
-        }
-      }
-
-      // Strategy 3: broader class-based search (less specific)
-      const broadSelectors = [
-        '[class*="message"]',
-        '[class*="Message"]',
-        '[class*="comment"]',
-        '[class*="Comment"]',
-      ];
-      for (const sel of broadSelectors) {
-        try {
-          const els = document.querySelectorAll(sel);
-          if (els.length >= 2) {
-            const result = extractDeepText(els);
-            if (result && result.length >= 1) return result;
-          }
-        } catch (_) {}
-      }
-
-      return null;
-    },
-  ];
-
-  for (const scraper of scrapers) {
-    try {
-      const result = scraper();
-      if (result && result.length > 0) return result.slice(-5);
-    } catch (_) {
-      /* skip broken scraper */
-    }
-  }
-
-  return [];
-}
-
-// Extract the deepest meaningful text from a list of message container elements
-function extractDeepText(nodes) {
-  const result = [];
-  const seen = new Set();
-  const arr = Array.from(nodes).slice(-10);
-
-  for (const el of arr) {
-    const text = getDeepestText(el);
-    if (!text || text.length < 2 || text.length > 1500) continue;
-    if (seen.has(text)) continue;
-    seen.add(text);
-    const sender = detectSenderByAlignment(el) || "Chat";
-    result.push({ sender, text: text.slice(0, 500) });
-  }
-  return dedupeMessages(result).slice(-5);
-}
-
-// Detect if a message is from "Me" or "Them" based on DOM hints and CSS alignment
-function detectSenderByAlignment(el) {
-  // Check class names for common patterns
-  const cls =
-    (el.className || "") + " " + (el.closest("[class]")?.className || "");
-  // Outgoing / self / me patterns
-  if (
-    /\b(message-out|msg-out|outgoing|is-mine|self|from-me|sent|current-user|--current)\b/i.test(
-      cls,
-    )
-  )
-    return "Me";
-  // Incoming / other / them patterns
-  if (
-    /\b(message-in|msg-in|incoming|is-other|from-them|received|other-user|--other)\b/i.test(
-      cls,
-    )
-  )
-    return "Them";
-
-  // Check data attributes
-  const dataDir =
-    el.getAttribute("data-message-direction") ||
-    el
-      .closest("[data-message-direction]")
-      ?.getAttribute("data-message-direction") ||
-    "";
-  if (dataDir === "outgoing" || dataDir === "sent") return "Me";
-  if (dataDir === "incoming" || dataDir === "received") return "Them";
-
-  // CSS alignment heuristic: right-aligned = Me, left-aligned = Them
-  try {
-    const target =
-      el.closest('[class*="message"], [class*="bubble"], [role="row"]') || el;
-    const style = getComputedStyle(target);
-    if (
-      style.marginLeft === "auto" ||
-      style.alignSelf === "flex-end" ||
-      style.float === "right"
-    )
-      return "Me";
-    if (
-      style.marginRight === "auto" ||
-      style.alignSelf === "flex-start" ||
-      style.float === "left"
-    )
-      return "Them";
-    // Check justify-content of parent
-    const parent = target.parentElement;
-    if (parent) {
-      const pStyle = getComputedStyle(parent);
-      if (pStyle.justifyContent === "flex-end") return "Me";
-      if (pStyle.justifyContent === "flex-start") return "Them";
-    }
-  } catch (_) {}
-
-  return null; // can't determine
-}
-
-// Get the most meaningful text from a message element
-// Walks down to find the innermost text, stripping timestamps/metadata
-function getDeepestText(el) {
-  // First try: look for specific text content elements within
-  const textSelectors = [
-    '[data-testid="tweetText"]',
-    "span.selectable-text",
-    "p",
-    '[dir="auto"]',
-    '[dir="ltr"]',
-    ".text-content",
-    '[class*="text"]',
-    '[class*="body"]',
-    '[class*="content"]',
-    "span",
-  ];
-  for (const sel of textSelectors) {
-    const found = el.querySelectorAll(sel);
-    if (found.length) {
-      // Collect text from matching elements, pick the longest meaningful one
-      let best = "";
-      for (const f of found) {
-        // Skip buttons, links that are just icons, timestamps
-        if (f.closest('button, [role="button"]')) continue;
-        if (f.querySelector("svg, img") && !f.textContent?.trim()) continue;
-        const t = f.innerText?.trim() || "";
-        if (t.length > best.length && t.length < 1500) best = t;
-      }
-      if (best.length >= 2) return cleanMessageText(best);
-    }
-  }
-  // Fallback: use the element's own text
-  const raw = (el.innerText || el.textContent || "").trim();
-  return cleanMessageText(raw);
-}
-
-// Clean a message text by removing common noise (timestamps, "seen", reaction counts, etc.)
-// Returns empty string for text that is purely UI noise.
-function cleanMessageText(text) {
-  if (!text) return "";
-  let t = text;
-  // Remove standalone timestamps like "10:30 AM", "14:25" at start or end
-  t = t.replace(/^\d{1,2}:\d{2}(\s?(AM|PM|am|pm))?[,\s]*/i, "");
-  t = t.replace(/[,\s]*\d{1,2}:\d{2}(\s?(AM|PM|am|pm))?\s*$/i, "");
-  // Remove "Read", "Delivered", "Seen" suffixes
-  t = t.replace(/\s*(Read|Delivered|Seen|Sent)\s*$/i, "");
-  // Remove leading/trailing whitespace and newlines
-  t = t.replace(/^[\s\n]+|[\s\n]+$/g, "");
-  // Collapse multiple newlines into one
-  t = t.replace(/\n{3,}/g, "\n\n");
-  t = t.trim();
-  // Return empty if the cleaned text is just a UI label
-  if (UI_NOISE_EXACT.test(t)) return "";
-  // Return empty if it contains accessibility / screen reader boilerplate
-  if (UI_NOISE_CONTAINS.test(t)) return "";
-  return t;
-}
-
-// Remove messages that are subsets of other messages (parent elements contain child text)
-function dedupeMessages(messages) {
-  if (messages.length <= 1) return messages;
-  const result = [];
-  for (let i = 0; i < messages.length; i++) {
-    let isSubset = false;
-    for (let j = 0; j < messages.length; j++) {
-      if (i === j) continue;
-      // If this message text is fully contained in another AND is significantly shorter
-      if (
-        messages[j].text.includes(messages[i].text) &&
-        messages[i].text.length < messages[j].text.length * 0.8
-      ) {
-        isSubset = true;
-        break;
-      }
-    }
-    if (!isSubset) result.push(messages[i]);
-  }
-  return result;
-}
-
-// Extract messages from a scrollable container near the input
-function extractFromScrollContainer(container) {
-  const children = container.querySelectorAll("div, li, p, article");
-  const blocks = [];
-  const seen = new Set();
-  for (const c of children) {
-    // Only leaf-ish elements (few children = likely a message, not a wrapper)
-    if (c.children.length > 8) continue;
-    // Skip elements that are too deep or are controls
-    if (c.closest('button, nav, header, footer, [role="button"]')) continue;
-    const text = cleanMessageText(c.innerText || "");
-    if (text.length > 3 && text.length < 1000 && !seen.has(text)) {
-      seen.add(text);
-      blocks.push({ sender: "Chat", text: text.slice(0, 500) });
-    }
-  }
-  return dedupeMessages(blocks).slice(-5);
-}
-
-// Walk up the DOM to find the nearest scrollable container
-function findScrollParent(el) {
-  let node = el.parentElement;
-  while (node && node !== document.body) {
-    const style = getComputedStyle(node);
-    if (
-      node.scrollHeight > node.clientHeight + 50 &&
-      (style.overflowY === "auto" || style.overflowY === "scroll")
-    ) {
-      return node;
-    }
-    node = node.parentElement;
-  }
-  return null;
-}
-
-function positionArPanel(b, el) {
-  const rect = el.getBoundingClientRect();
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const panelW = 360;
-  const margin = 12;
-
-  // Horizontal positioning
-  let left = rect.left;
-  if (left + panelW > vw) left = Math.max(margin, vw - panelW - margin);
-
-  // Vertical positioning: prefer above the input, fall back to below
-  const spaceAbove = rect.top - margin;
-  const spaceBelow = vh - rect.bottom - margin;
-
-  let top;
-  let maxH;
-
-  if (spaceAbove >= 200 && spaceAbove >= spaceBelow) {
-    // Place above
-    maxH = Math.min(spaceAbove - OFFSET_Y, 500);
-    top = rect.top - Math.min(maxH, 400) - OFFSET_Y;
-    if (top < margin) top = margin;
-  } else {
-    // Place below
-    maxH = Math.min(spaceBelow - OFFSET_Y, 500);
-    top = rect.bottom + OFFSET_Y;
-  }
-
-  // Ensure max-height is at least 150px to be useful
-  maxH = Math.max(maxH, 150);
-
-  b.arPanel.style.top = `${top}px`;
-  b.arPanel.style.left = `${left}px`;
-  b.arPanel.style.maxHeight = `${maxH}px`;
-}
-
-function triggerAutoReply(el) {
-  if (_inflight) return;
-
-  const b = getBar();
-  const messages = scrapeMessages();
-
-  // Smart panel positioning
-  positionArPanel(b, el);
-
-  if (messages.length === 0) {
-    b.arPanel.innerHTML = `
-      <div class="ar-title">
-        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg>
-        Write Reply
-      </div>
-      <div class="ar-no-messages">No messages found on this page.<br>Try using this on a chat like WhatsApp Web.</div>
-      <div class="ar-actions">
-        <button class="ar-btn ar-btn-cancel" id="ar-close">Close</button>
       </div>
     `;
-    b.arPanel.classList.add("visible");
-    b.arPanel.querySelector("#ar-close").addEventListener("click", () => {
-      b.arPanel.classList.remove("visible");
+  }
+
+  _bindElements() {
+    this.logo = this.shadow.getElementById("logo");
+    this.panel = this.shadow.getElementById("panel");
+    this.selectionLogo = this.shadow.getElementById("selection-logo");
+    this.dialog = this.shadow.getElementById("dialog");
+    this.responseBox = this.shadow.getElementById("response-box");
+    this.status = this.shadow.getElementById("status-text");
+    this.statusBox = this.shadow.getElementById("status-box");
+    
+    this.logo.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.expanded = !this.expanded;
+      if (this.expanded) this._loadSettings();
+      this.refresh();
     });
-    return;
-  }
 
-  // Show messages preview + loading state
-  const msgsHTML = messages
-    .map(
-      (m) => `
-    <div class="ar-msg ${m.sender === "Me" ? "me" : "them"}">
-      <span class="ar-sender">${m.sender}</span>
-      ${escapeHTML(m.text)}
-    </div>
-  `,
-    )
-    .join("");
+    this.shadow.getElementById("btn-settings").addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.isDialogVisible = !this.isDialogVisible;
+      this._updateDialogValues();
+      this.refresh();
+    });
 
-  b.arPanel.innerHTML = `
-    <div class="ar-title">
-      <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg>
-      Write Reply
-    </div>
-    <div class="ar-status" id="ar-loading">
-      <div class="spinner"></div>
-      Generating reply…
-    </div>
-  `;
-  b.arPanel.classList.add("visible");
-
-  // Send to background
-  _inflight = true;
-  setBarBusy(true, "auto-reply");
-
-  const timer = setTimeout(() => {
-    _inflight = false;
-    setBarBusy(false);
-    showAutoReplyError(b, msgsHTML, messages.length, "Request timed out");
-  }, REQUEST_TIMEOUT_MS);
-
-  try {
-    chrome.runtime.sendMessage(
-      {
-        type: "voca:auto-reply",
-        messages,
-        tone: _lastTone,
-        speakingLang: _speakingLang,
-      },
-      (response) => {
-        clearTimeout(timer);
-        _inflight = false;
-        setBarBusy(false);
-
-        if (chrome.runtime.lastError) {
-          showAutoReplyError(
-            b,
-            msgsHTML,
-            messages.length,
-            chrome.runtime.lastError.message || "Request failed",
-          );
-          return;
-        }
-        if (!response || response.error) {
-          showAutoReplyError(
-            b,
-            msgsHTML,
-            messages.length,
-            response?.error || "No response",
-          );
-          return;
-        }
-
-        const reply = cleanResult(response.result, "");
-        if (!reply) {
-          showAutoReplyError(
-            b,
-            msgsHTML,
-            messages.length,
-            "Empty response from AI",
-          );
-          return;
-        }
-
-        // Show result with Insert / Cancel
-        b.arPanel.innerHTML = `
-          <div class="ar-title">
-            <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg>
-            Write Reply
-          </div>
-          <div class="ar-result-box" id="ar-result">${escapeHTML(reply)}</div>
-          <div class="ar-actions">
-            <button class="ar-btn ar-btn-cancel" id="ar-cancel">Cancel</button>
-            <button class="ar-btn ar-btn-insert" id="ar-insert">Insert Reply</button>
-          </div>
-        `;
-
-        b.arPanel.querySelector("#ar-cancel").addEventListener("click", () => {
-          b.arPanel.classList.remove("visible");
+    // Instant Auto-Save
+    const selects = ["sel-speaking", "sel-translate", "sel-tone"];
+    selects.forEach(id => {
+      const el = this.shadow.getElementById(id);
+      if (el) {
+        el.addEventListener("change", async (e) => {
+          const key = id.split("-")[1] === "speaking" ? "speakingLang" : 
+                      id.split("-")[1] === "translate" ? "translateLang" : "tone";
+          this.settings[key] = e.target.value;
+          await chrome.storage.sync.set({ [key]: e.target.value });
+          this._updateSettingsUI();
         });
-        b.arPanel.querySelector("#ar-insert").addEventListener("click", () => {
-          applyText(el, reply, false);
-          b.arPanel.classList.remove("visible");
-          hideBar();
-        });
-      },
-    );
-  } catch (err) {
-    clearTimeout(timer);
-    _inflight = false;
-    setBarBusy(false);
-    if (err.message.includes("Extension context invalidated")) {
-      alert(
-        "Voca Extension was updated! Please refresh the page to continue using it.",
-      );
-      return;
-    }
-    showAutoReplyError(
-      b,
-      msgsHTML,
-      messages.length,
-      err.message || "Extension error",
-    );
-  }
-}
+      }
+    });
 
-function showAutoReplyError(b, msgsHTML, msgCount, errorMsg) {
-  b.arPanel.innerHTML = `
-    <div class="ar-title">
-      <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg>
-      Write Reply
-    </div>
-    <div class="ar-error">⚠ ${escapeHTML(errorMsg)}</div>
-    <div class="ar-actions">
-      <button class="ar-btn ar-btn-cancel" id="ar-close">Close</button>
-    </div>
-  `;
-  b.arPanel.querySelector("#ar-close").addEventListener("click", () => {
-    b.arPanel.classList.remove("visible");
-  });
-}
-
-function escapeHTML(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
-}
-
-// ─── Input debounce & spellcheck ─────────────────────────────────────────────
-// NOTE: typing only updates bar visibility — it never triggers an AI request.
-const _attached = new WeakSet();
-const _debounces = new WeakMap();
-
-function onInput(el) {
-  if (!_aiEnabled) {
-    hideBar();
-    return;
-  }
-  if (_inflight) return; // don't disturb the bar while a request is in flight
-  clearTimeout(_debounces.get(el));
-  _debounces.set(
-    el,
-    setTimeout(() => {
-      // Always show the logo row (auto-reply works with no text)
-      showBar(el);
-    }, DEBOUNCE_MS),
-  );
-}
-
-function attach(el) {
-  if (_attached.has(el)) return;
-  _attached.add(el);
-
-  // Enable browser spellcheck during typing
-  el.spellcheck = true;
-
-  el.addEventListener("input", () => onInput(el));
-  el.addEventListener("focus", () => {
-    if (!_aiEnabled) return;
-    // Always show on focus — auto-reply doesn't need typed text
-    showBar(el);
-  });
-  el.addEventListener("blur", (e) =>
-    setTimeout(() => {
-      // Don't hide if a request is busy OR if the user is interacting with settings
-      if (_inflight || _settingsPanel?.el.classList.contains("visible")) return;
-      
-      // Check if focus moved to one of our own panels (Shadow DOM check)
-      const activeHost = document.activeElement;
-      if (activeHost === _bar?.host || activeHost === _settingsPanel?.host || activeHost === _popup?.host) return;
-
-      hideBar();
-      hideSettingsPanel();
-    }, 250),
-  );
-}
-
-// ─── DOM scan ─────────────────────────────────────────────────────────────────
-const SELECTOR =
-  'textarea, input[type="text"], input:not([type]), [contenteditable="true"]';
-
-function scan(root) {
-  if (root instanceof Element && isEditable(root)) attach(root);
-  root.querySelectorAll?.(SELECTOR)?.forEach(attach);
-}
-
-// Initial scan
-scan(document);
-
-// Watch for dynamically added elements and attribute changes
-new MutationObserver((mutations) => {
-  for (const m of mutations) {
-    if (m.type === "childList") {
-      for (const node of m.addedNodes)
-        if (node.nodeType === Node.ELEMENT_NODE) scan(node);
-    } else if (
-      m.type === "attributes" &&
-      m.attributeName === "contenteditable"
-    ) {
-      if (m.target.nodeType === Node.ELEMENT_NODE) scan(m.target);
-    }
-  }
-}).observe(document.documentElement, {
-  childList: true,
-  subtree: true,
-  attributes: true,
-  attributeFilter: ["contenteditable"],
-});
-
-// Backup global focus listener for SPAs (like LinkedIn) where DOM mutation observers might miss dynamic elements
-document.addEventListener("focusin", (e) => {
-  if (e.target && isEditable(e.target)) {
-    attach(e.target);
-    if (_aiEnabled) {
-      showBar(e.target);
-    }
-  }
-});
-
-// Global input listener to catch typing in SPAs and force show the logo if it's missing
-document.addEventListener(
-  "input",
-  (e) => {
-    if (!_aiEnabled || _inflight) return;
-    const el = e.target;
-    if (el && isEditable(el)) {
-      const text = getText(el).trim();
-      if (text.length >= 5) {
-        const b = getBar();
-        // If the bar/logo is not visible, force show it
-        if (
-          !b.logoRow.classList.contains("visible") &&
-          !b.el.classList.contains("visible")
-        ) {
-          attach(el);
-          showBar(el);
+    this.shadow.getElementById("btn-apply-res").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (this.pendingResult) {
+        if (this.activeField) {
+          NativeBridge.applyToElement(this.activeField.el, this.pendingResult);
+        } else {
+          // If no active field, try to find the WhatsApp input as a fallback
+          const waInput = document.querySelector('div[contenteditable="true"][data-lexical-editor="true"]') || 
+                          document.querySelector('footer div[contenteditable="true"]') || 
+                          document.querySelector('#main div[contenteditable="true"]');
+          if (waInput) {
+            console.log("[Voca] Found WhatsApp fallback input", waInput);
+            NativeBridge.applyToElement(waInput, this.pendingResult);
+          } else {
+            this._showStatus("No input field found to apply", 3000);
+          }
         }
       }
+      this.isResponseVisible = false;
+      this.expanded = false;
+      this.refresh();
+    });
+
+    this.shadow.getElementById("btn-cancel-res").addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.isResponseVisible = false;
+      this.refresh();
+    });
+
+    this.selectionLogo.addEventListener("mousedown", (e) => {
+      // Prevent selection loss when clicking the logo
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    this.selectionLogo.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._translateSelection();
+    });
+
+    this.shadow.getElementById("btn-copy-res").addEventListener("click", (e) => {
+      e.stopPropagation();
+      const btn = this.shadow.getElementById("btn-copy-res");
+      const text = this.shadow.getElementById("result-text").textContent;
+      navigator.clipboard.writeText(text);
+      
+      const originalText = btn.textContent;
+      btn.textContent = "Copied!";
+      btn.classList.add("accent");
+      
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove("accent");
+      }, 2000);
+    });
+
+
+    this.shadow.getElementById("btn-reply").addEventListener("click", (e) => { e.stopPropagation(); this.trigger("reply"); });
+    this.shadow.getElementById("btn-fix").addEventListener("click", (e) => { e.stopPropagation(); this.trigger("grammar"); });
+    this.shadow.getElementById("btn-improve").addEventListener("click", (e) => { e.stopPropagation(); this.trigger("improve"); });
+    this.shadow.getElementById("btn-translate").addEventListener("click", (e) => { e.stopPropagation(); this.trigger("translate"); });
+
+    // Anti-spam global click handler
+    this.shadow.querySelectorAll(".action-btn").forEach(btn => {
+      btn.addEventListener("mousedown", (e) => {
+        if (this.inflight) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+    });
+    
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg.type === "voca:setting") {
+        this.settings[msg.key] = msg.value;
+        this._updateSettingsUI();
+      }
+    });
+  }
+
+  _updateDialogValues() {
+    this.shadow.getElementById("sel-speaking").value = this.settings.speakingLang;
+    this.shadow.getElementById("sel-translate").value = this.settings.translateLang;
+    this.shadow.getElementById("sel-tone").value = this.settings.tone;
+  }
+
+  showSelectionLogo(selection) {
+    if (!this.selectionLogo || !selection || selection.rangeCount === 0) return;
+    try {
+      const range = selection.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+      
+      this.lastSelectionRect = rect;
+      const top = Math.max(5, rect.top - 32);
+      const left = Math.max(5, rect.left + rect.width / 2 - 12);
+      
+      this.selectionLogo.style.top = `${top}px`;
+      this.selectionLogo.style.left = `${left}px`;
+      this.selectionLogo.classList.add("visible");
+      
+      this.lastSelectedText = selection.toString().trim();
+      this.lastSelectionRange = range.cloneRange();
+    } catch (e) {
+      console.warn("[Voca] Failed to position selection logo:", e);
     }
-  },
-  true,
-);
-
-// ─── Global dismissal ─────────────────────────────────────────────────────────
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    closePopup();
-    hideBar();
-    hideSettingsPanel();
   }
-});
-document.addEventListener("mousedown", (e) => {
-  // In Shadow DOM, e.target is often the host element when viewed from document
-  const target = e.target;
-  const inPopup = _popup?.host === target || _popup?.host.contains(target);
-  const inBar = _bar?.host === target || _bar?.host.contains(target);
-  const inSettings = _settingsPanel?.host === target || _settingsPanel?.host.contains(target);
 
-  if (!inPopup) closePopup();
-  
-  if (!inBar && !inSettings) {
-    hideBar();
-    hideSettingsPanel();
-    _bar?.arPanel?.classList.remove("visible");
+
+
+  hideSelectionLogo() {
+    if (this.selectionLogo) this.selectionLogo.classList.remove("visible");
   }
-});
+
+  async _translateSelection() {
+    if (!this.selectionLogo) return;
+    const text = this.lastSelectedText || window.getSelection().toString().trim();
+    if (!text) return;
+
+    this.selectionLogo.classList.add("breathing");
+    
+    this._safeSendMessage({
+      type: "voca:request",
+      text,
+      mode: "translate",
+      targetLang: this.settings.speakingLang,
+      tone: "Professional"
+    }, (res) => {
+      this.selectionLogo.classList.remove("breathing");
+      this.selectionLogo.classList.remove("visible");
+      
+      if (res?.result) {
+        if (this.lastSelectionRange) {
+          try {
+            const range = this.lastSelectionRange;
+            range.deleteContents();
+            range.insertNode(document.createTextNode(res.result));
+            window.getSelection().removeAllRanges();
+          } catch(e) {
+            console.error("[Voca] Could not replace selection inline:", e);
+          }
+        }
+      } else if (res?.error) {
+        console.error("[Voca] Translation error:", res.error);
+      }
+      this.refresh();
+    });
+  }
+
+  _safeSendMessage(msg, cb) {
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+      try {
+        chrome.runtime.sendMessage(msg, (res) => {
+          if (chrome.runtime.lastError) {
+            console.warn("[Voca] Runtime error:", chrome.runtime.lastError.message);
+            if (cb) cb({ error: "Extension updated. Please refresh the page." });
+            return;
+          }
+          if (cb) cb(res);
+        });
+      } catch (e) {
+        console.warn("[Voca] Extension context invalidated:", e);
+        if (cb) cb({ error: "Extension context invalidated. Please refresh the page." });
+      }
+    } else {
+      console.warn("[Voca] Extension context not available.");
+      if (cb) cb({ error: "Extension not available." });
+    }
+  }
+
+
+
+  attach(field) {
+    this.activeField = field;
+    this.refresh();
+  }
+
+  refresh() {
+    if (!this.logo || !this.panel) return;
+
+    // Position Selection Result (when activeField is null)
+    if (!this.activeField) {
+      this.logo.classList.remove("visible");
+      this.panel.classList.remove("visible");
+      if (this.dialog) this.dialog.classList.remove("visible");
+      
+      if (this.isResponseVisible && this.responseBox && this.lastSelectionRect) {
+        this.responseBox.classList.add("visible");
+        const rect = this.lastSelectionRect;
+        const respHeight = this.responseBox.offsetHeight || 250;
+        
+        // Dynamic positioning for selection response
+        if (rect.top < respHeight + 50) {
+          this.responseBox.style.top = `${rect.bottom + 10}px`;
+          this.responseBox.style.bottom = 'auto';
+        } else {
+          this.responseBox.style.bottom = `${window.innerHeight - rect.top + 10}px`;
+          this.responseBox.style.top = 'auto';
+        }
+        this.responseBox.style.left = `${Math.max(10, Math.min(rect.left, window.innerWidth - 320))}px`;
+      } else if (this.responseBox) {
+        this.responseBox.classList.remove("visible");
+      }
+      return;
+    }
+    
+    const rect = this.activeField.el.getBoundingClientRect();
+    const isFocused = this.activeField && (
+      document.activeElement === this.activeField.el || 
+      this.activeField.el.contains(document.activeElement)
+    );
+
+    if (rect.height === 0 || rect.width === 0 || !document.contains(this.activeField.el)) {
+      this.activeField = null;
+      this.refresh();
+      return;
+    }
+
+    const shouldShowPanel = this.expanded || this.inflight;
+    const logoSize = 24;
+    const logoTop = rect.top - logoSize - 8;
+    const logoLeft = rect.left;
+
+    this.logo.style.top = `${Math.max(5, logoTop)}px`;
+    this.logo.style.left = `${Math.max(5, logoLeft)}px`;
+    this.logo.style.position = 'absolute';
+    
+    if (this.isTyping && !this.inflight && !this.expanded) {
+      this.logo.classList.add("typing");
+    } else {
+      this.logo.classList.remove("typing");
+    }
+    
+    if (this.inflight) {
+      this.logo.classList.add("breathing");
+      this.logo.classList.add("visible");
+    } else {
+      this.logo.classList.remove("breathing");
+    }
+    
+    if (shouldShowPanel) {
+      this.logo.classList.remove("visible");
+      
+      const panelHeight = this.panel.offsetHeight || 62; 
+      const panelTop = logoTop - panelHeight + 4;
+      const panelLeft = logoLeft;
+      
+      this.panel.style.top = `${Math.max(5, panelTop)}px`;
+      this.panel.style.left = `${Math.max(5, panelLeft)}px`;
+      this.panel.classList.add("visible");
+
+      const btns = this.shadow.querySelectorAll(".action-btn");
+      btns.forEach(b => b.disabled = this.inflight);
+
+      if (this.isDialogVisible && this.dialog) {
+        this.dialog.classList.add("visible");
+        const dialogHeight = this.dialog.offsetHeight || 220;
+        const spaceAbove = panelTop;
+        
+        if (spaceAbove < dialogHeight + 20) {
+          // Show below if not enough space above
+          this.dialog.style.top = `${panelTop + panelHeight + 10}px`;
+          this.dialog.style.bottom = 'auto';
+        } else {
+          // Show above
+          this.dialog.style.bottom = `${window.innerHeight - panelTop + 5}px`;
+          this.dialog.style.top = 'auto';
+        }
+        this.dialog.style.left = `${Math.max(5, panelLeft)}px`;
+      } else if (this.dialog) {
+        this.dialog.classList.remove("visible");
+      }
+
+      if (this.isResponseVisible && this.responseBox) {
+        this.responseBox.classList.add("visible");
+        const respHeight = this.responseBox.offsetHeight || 280;
+        const spaceAbove = panelTop;
+
+        if (spaceAbove < respHeight + 20) {
+          // Show below
+          this.responseBox.style.top = `${panelTop + panelHeight + 10}px`;
+          this.responseBox.style.bottom = 'auto';
+        } else {
+          // Show above
+          this.responseBox.style.bottom = `${window.innerHeight - panelTop + 10}px`;
+          this.responseBox.style.top = 'auto';
+        }
+        this.responseBox.style.left = `${Math.max(5, panelLeft)}px`;
+        
+        if (this.isReadOnlyResponse) this.responseBox.classList.add("read-only");
+        else this.responseBox.classList.remove("read-only");
+      } else if (this.responseBox) {
+        this.responseBox.classList.remove("visible");
+      }
+    } else {
+      const hasContent = this.activeField.getValue().trim().length > 0;
+      
+      const btnFix = this.shadow.getElementById("btn-fix");
+      const btnImprove = this.shadow.getElementById("btn-improve");
+      const btnTranslate = this.shadow.getElementById("btn-translate");
+      const btnReply = this.shadow.getElementById("btn-reply");
+
+      // Update button states - Logic fix: when input is empty, only reply is active
+      if (btnFix) btnFix.disabled = this.inflight || !hasContent;
+      if (btnImprove) btnImprove.disabled = this.inflight || !hasContent;
+      if (btnTranslate) btnTranslate.disabled = this.inflight || !hasContent;
+      // "Write Reply" is special: 
+      // - If input has content, it acts on that content.
+      // - If input is empty, it relies on conversation history.
+      // Requirement: "when inout is empty then only write reply should be active"
+      if (btnReply) {
+        btnReply.disabled = this.inflight;
+        // Make it visually pop if it's the "only" active one
+        if (!hasContent) btnReply.classList.add("pulse-subtle");
+        else btnReply.classList.remove("pulse-subtle");
+      }
+
+      const shouldShowLogo = (isFocused || this.inflight) && !this.expanded && !this.isResponseVisible;
+      if (shouldShowLogo) {
+        this.logo.classList.add("visible");
+      } else {
+        this.logo.classList.remove("visible");
+      }
+      this.panel.classList.remove("visible");
+      if (this.dialog) this.dialog.classList.remove("visible");
+      
+      if (this.isResponseVisible && this.responseBox) {
+        this.responseBox.classList.add("visible");
+        const respHeight = this.responseBox.offsetHeight || 280;
+        
+        if (logoTop < respHeight + 20) {
+          this.responseBox.style.top = `${logoTop + 40}px`;
+          this.responseBox.style.bottom = 'auto';
+        } else {
+          this.responseBox.style.bottom = `${window.innerHeight - logoTop + 10}px`;
+          this.responseBox.style.top = 'auto';
+        }
+        this.responseBox.style.left = `${Math.max(5, logoLeft)}px`;
+        
+        if (this.isReadOnlyResponse) this.responseBox.classList.add("read-only");
+        else this.responseBox.classList.remove("read-only");
+      } else if (this.responseBox) {
+        this.responseBox.classList.remove("visible");
+      }
+    }
+  }
+
+
+  async trigger(mode) {
+    if (this.inflight) return;
+    
+    let text = this.activeField ? this.activeField.getValue().trim() : "";
+    let messages = [];
+
+    // Try to scrape context
+    messages = this._scrapeLinkedInContext();
+    if (messages.length === 0) {
+      messages = this._scrapeWhatsAppContext();
+    }
+
+    if (messages.length === 0 && !text) {
+      this._showStatus("No context found", 2000);
+      return;
+    }
+    
+    // Only check length for grammar/improve/translate on the input field
+    if (mode !== "reply" && text.length < CONSTANTS.MIN_LENGTH) {
+      this._showStatus("Text too short", 2000);
+      return;
+    }
+
+    this.inflight = true;
+    this.isResponseVisible = false;
+    this.isReadOnlyResponse = false;
+    this.currentAction = mode;
+    
+    // Set loading state on the button
+    const btnId = mode === "grammar" ? "btn-fix" : mode === "improve" ? "btn-improve" : mode === "translate" ? "btn-translate" : "btn-reply";
+    const btn = this.shadow.getElementById(btnId);
+    if (btn) {
+      btn.dataset.originalText = btn.innerHTML;
+      btn.innerHTML = `<span class="loading-dots"></span>`;
+      btn.classList.add("loading");
+    }
+
+    // Lock all other action buttons
+    const allBtns = this.shadow.querySelectorAll(".action-btn");
+    allBtns.forEach(b => b.disabled = true);
+
+    this.refresh();
+
+    const requestType = mode === "reply" && messages.length > 0 ? "voca:auto-reply" : "voca:request";
+    const payload = requestType === "voca:auto-reply" 
+      ? { type: requestType, messages, tone: this.settings.tone }
+      : { type: requestType, text, mode, targetLang: this.settings.speakingLang, tone: this.settings.tone };
+
+    this._safeSendMessage(payload, (res) => {
+      console.log('[Voca] AI response received:', res);
+      this.inflight = false;
+      
+      // Restore buttons
+      allBtns.forEach(b => b.disabled = false);
+      
+      const btn = this.shadow.getElementById(btnId);
+      if (btn && btn.dataset.originalText) {
+        btn.innerHTML = btn.dataset.originalText;
+        btn.classList.remove("loading");
+      }
+
+      if (res?.result) {
+        console.log('[Voca] Success! Result length:', res.result.length);
+        this.pendingResult = res.result;
+        this.isResponseVisible = true;
+        
+        // Update Action Label
+        const actionMap = {
+          "grammar": "Fixed Grammar",
+          "improve": "Improved Content",
+          "translate": "Translated Text",
+          "reply": "Generated Reply"
+        };
+        const actionLabel = this.shadow.getElementById("action-label");
+        if (actionLabel) actionLabel.textContent = actionMap[mode] || "AI Response";
+
+        this.shadow.getElementById("original-text").textContent = text || (messages && messages.length > 0 ? messages[messages.length-1].text : "");
+        this.shadow.getElementById("result-text").textContent = res.result;
+      } else if (res?.error) {
+        console.error('[Voca] AI Error:', res.error);
+        this._showStatus(res.error, 5000);
+        // Don't hide status box immediately if it's an error
+      } else {
+        if (this.statusBox) this.statusBox.style.display = "none";
+      }
+      this.refresh();
+    });
+  }
+
+
+  _scrapeLinkedInContext() {
+    // LinkedIn specific selector for message bubbles
+    const bubbles = document.querySelectorAll(".msg-s-event-listitem__body");
+    const msgs = Array.from(bubbles).slice(-5).map(b => {
+      const isMe = b.closest(".msg-s-event-listitem--me") !== null;
+      return { sender: isMe ? "Me" : "Them", text: b.innerText.trim() };
+    });
+    return msgs;
+  }
+
+  _scrapeWhatsAppContext() {
+    // WhatsApp specific selectors for message bubbles
+    const bubbles = document.querySelectorAll('.message-in, .message-out, [data-testid="msg-container"]');
+    if (bubbles.length === 0) return [];
+    
+    // Get last 10 messages for better context
+    const msgs = Array.from(bubbles).slice(-10).map(b => {
+      const isMe = b.classList.contains("message-out"); 
+      const textNode = b.querySelector(".copyable-text span") || 
+                       b.querySelector("span[selectable]") || 
+                       b.querySelector(".selectable-text") || 
+                       b.querySelector('[data-testid="quoted-msg-text"]') ||
+                       b;
+      const text = textNode ? (textNode.innerText || textNode.textContent || "").trim() : "";
+      return { role: isMe ? "assistant" : "user", content: text };
+    }).filter(m => m.content && m.content.length > 1);
+    
+    return msgs;
+  }
+
+  _showStatus(msg, timeout) {
+    if (!this.status || !this.statusBox) return;
+    this.status.textContent = msg;
+    this.statusBox.style.display = "block";
+    this.status.classList.remove("loading-dots");
+    
+    if (timeout) {
+      setTimeout(() => {
+        if (this.status.textContent === msg) {
+          this.statusBox.style.display = "none";
+          this.status.textContent = "";
+        }
+      }, timeout);
+    }
+  }
+}
+
+// ─── Field Observer ──────────────────────────────────────────────────────────
+class FieldObserver {
+  constructor(el, host) {
+    this.el = el;
+    this.host = host;
+    this._init();
+  }
+
+  _init() {
+    this.el.addEventListener("focus", () => {
+      this.host.attach(this);
+    });
+    this.el.addEventListener("input", () => {
+      this.host.isTyping = true;
+      if (this.host.typingTimeout) clearTimeout(this.host.typingTimeout);
+      this.host.typingTimeout = setTimeout(() => {
+        this.host.isTyping = false;
+        this.host.refresh();
+      }, 500); // Stop typing after 500ms of inactivity
+      this.host.refresh();
+    });
+    
+    const ro = new ResizeObserver(() => {
+      if (this.host.activeField === this) this.host.refresh();
+    });
+    ro.observe(this.el);
+  }
+
+  getValue() {
+    if (this.el.tagName === "TEXTAREA" || this.el.tagName === "INPUT") return this.el.value;
+    return (this.el.innerText || this.el.textContent || "").replace(/\n/g, ' ').trim();
+  }
+}
+
+// ─── Integration Manager ────────────────────────────────────────────────────
+class IntegrationManager {
+  constructor() {
+    this.host = new UIHost();
+    this.observers = new Map();
+    this._start();
+  }
+
+  _start() {
+    console.log("[Voca] Integration Manager active (Vertical UI)");
+    this.scan();
+
+    setInterval(() => this.scan(), CONSTANTS.SCAN_INTERVAL);
+
+    new MutationObserver(() => this.scan()).observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
+
+    document.addEventListener("focusin", (e) => {
+      const target = this._findTarget(e.target);
+      if (target) {
+        this._monitor(target);
+        this.host.attach(this.observers.get(target));
+      }
+    }, true);
+
+    document.addEventListener("mousedown", (e) => {
+      // 1. If clicked inside our shadow host, ignore
+      if (this.host.container && this.host.container.contains(e.target)) return;
+      
+      // 2. If clicked an editable field, attach it but don't reset unless it's a different field
+      const target = this._findTarget(e.target);
+      if (target) {
+        const obs = this.observers.get(target);
+        if (obs) {
+          if (this.host.activeField !== obs) {
+             this.host.expanded = false;
+             this.host.isDialogVisible = false;
+             this.host.isResponseVisible = false;
+          }
+          this.host.attach(obs);
+          return;
+        }
+      }
+
+      // 3. Otherwise, if clicked outside everything, clear state
+      this.host.expanded = false;
+      this.host.isDialogVisible = false;
+      this.host.isResponseVisible = false;
+      this.host.activeField = null;
+      this.host.hideSelectionLogo();
+      this.host.refresh();
+    }, true);
+
+    document.addEventListener("mouseup", (e) => {
+      if (this.host.container && this.host.container.contains(e.target)) return;
+      
+      setTimeout(() => {
+        const selection = window.getSelection();
+        const text = selection.toString().trim();
+        const selectionNode = selection.anchorNode;
+        const isSelectionInInput = this.host.activeField && 
+                                   (this.host.activeField.el.contains(selectionNode) || 
+                                    this.host.activeField.el === selectionNode);
+
+        if (text && text.length >= CONSTANTS.MIN_LENGTH && !isSelectionInInput) {
+          this.host.showSelectionLogo(selection);
+        } else {
+          this.host.hideSelectionLogo();
+        }
+      }, 10);
+    }, true);
+
+    window.addEventListener("scroll", () => this.host.refresh(), true);
+    window.addEventListener("resize", () => this.host.refresh(), true);
+  }
+
+  _findTarget(el) {
+    if (!el || !(el instanceof HTMLElement)) return null;
+    if (this._isEditable(el)) return el;
+    let parent = el.parentElement;
+    for (let i=0; i<3 && parent; i++) {
+      if (this._isEditable(parent)) return parent;
+      parent = parent.parentElement;
+    }
+    return null;
+  }
+
+  scan() {
+    this._deepScan(document.body);
+  }
+
+  _deepScan(root) {
+    if (!root) return;
+    const selector = 'textarea, [contenteditable="true"], [role="textbox"], input[type="text"]';
+    root.querySelectorAll?.(selector).forEach(el => {
+      if (this._isEditable(el)) this._monitor(el);
+    });
+    const all = root.querySelectorAll?.("*") || [];
+    all.forEach(el => {
+      if (el.shadowRoot) {
+        this._deepScan(el.shadowRoot);
+      }
+    });
+  }
+
+  _isEditable(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el.hasAttribute(CONSTANTS.IGNORE_ATTR)) return false;
+    if (el.closest("#voca-host")) return false;
+    const role = el.getAttribute("role");
+    const isCE = el.isContentEditable || el.getAttribute("contenteditable") === "true";
+    const isInput = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && ["text", "search", "email", "url"].includes(el.type.toLowerCase()));
+    return isCE || role === "textbox" || isInput;
+  }
+
+  _monitor(el) {
+    if (this.observers.has(el)) return;
+    if (el.hasAttribute(CONSTANTS.PROCESSED_ATTR)) return;
+    el.setAttribute(CONSTANTS.PROCESSED_ATTR, "true");
+    this.observers.set(el, new FieldObserver(el, this.host));
+    console.log("[Voca] Monitoring new field:", el);
+  }
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+  if (!window._vocaInitialized) {
+    window._vocaInitialized = true;
+    const run = () => { if (document.body) new IntegrationManager(); };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", run);
+    } else {
+      run();
+    }
+  }
+}

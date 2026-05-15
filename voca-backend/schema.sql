@@ -11,3 +11,10 @@ CREATE TABLE IF NOT EXISTS usage_tracking (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_tracking(userId);
+
+CREATE TABLE IF NOT EXISTS user_credits (
+  userId TEXT PRIMARY KEY,
+  balance INTEGER DEFAULT 0,
+  totalPurchased INTEGER DEFAULT 0,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);

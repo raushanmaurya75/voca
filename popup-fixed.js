@@ -99,18 +99,17 @@ function displaySubscriptionInfo(data) {
   currentPlan.textContent = planInfo.text;
   currentPlan.style.color = planInfo.color;
   
-  // Update usage text with new structure
-  const messageLimit = data.messageLimit || 200;
-  const translationLimit = data.translationLimit || 80;
-  const messagesUsed = data.messagesUsed || 0;
-  const translationsUsed = data.translationsUsed || 0;
+  // Update usage text using the new structured data
+  const paid = data.paid || { used: 0, total: 0 };
+  const free = data.free || { used: 0, total: 0 };
   
-  messagesUsage.textContent = `${messagesUsed} / ${messageLimit}`;
-  translationsUsage.textContent = `${translationsUsed} / ${translationLimit}`;
+  // Show usage in 'Used / Total' format explicitly
+  messagesUsage.textContent = `${paid.used} / ${paid.total}`;
+  translationsUsage.textContent = `${free.used} / ${free.total}`;
 
   // Update progress bars
-  const msgPercent = (messagesUsed / messageLimit) * 100;
-  const transPercent = (translationsUsed / translationLimit) * 100;
+  const msgPercent = paid.total > 0 ? (paid.used / paid.total) * 100 : 0;
+  const transPercent = free.total > 0 ? (free.used / free.total) * 100 : 0;
   messagesBar.style.width = `${Math.min(msgPercent, 100)}%`;
   translationsBar.style.width = `${Math.min(transPercent, 100)}%`;
 
@@ -131,13 +130,7 @@ function displaySubscriptionInfo(data) {
   const btnUpgrade = document.getElementById('btn-upgrade');
   if (btnUpgrade) {
     btnUpgrade.style.display = plan === 'premium' ? 'none' : 'block';
-    if (plan === 'premium') {
-      btnUpgrade.textContent = 'Contact Support';
-    } else if (plan === 'free') {
-      btnUpgrade.textContent = 'Upgrade to Pro $8';
-    } else {
-      btnUpgrade.textContent = 'Upgrade to Premium $12';
-    }
+    btnUpgrade.textContent = 'Buy Credits';
   }
 }
 
