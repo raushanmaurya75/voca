@@ -49,7 +49,7 @@ const NativeBridge = {
         try {
           chrome.runtime.sendMessage({ type: "voca:execute-main", value: value }, (response) => {
              if (chrome.runtime.lastError) {
-                 console.error("[Voca] Main world execution error:", chrome.runtime.lastError);
+                 // console.warn("[Voca] Main world execution error:", chrome.runtime.lastError);
                  this._fallbackReplacement(el, value);
              }
           });
@@ -119,7 +119,7 @@ class UIHost {
     this.status = null;
     this.activeField = null;
     this.expanded = false;
-    this.settings = { speakingLang: "English", translateLang: "Spanish", tone: "Professional" };
+    this.settings = { speakingLang: "English", translatedLang: "Hindi", tone: "Professional" };
     this.selectionLogo = null;
     this.dialog = null;
     this.isDialogVisible = false;
@@ -129,10 +129,14 @@ class UIHost {
     this.responseBox = null;
     this.typingTimeout = null;
     this.isTyping = false;
+    this.isUpgradeVisible = false;
     this.currentAction = "";
+    this.isFeedbackVisible = false;
+    this.selectedRating = 0;
     
     this._init();
     this._loadSettings();
+    this._checkFeedbackPeriodically();
   }
 
   async _loadSettings() {
@@ -140,7 +144,7 @@ class UIHost {
       if (!chrome.runtime?.id) return;
       const prefs = await chrome.storage.sync.get({ 
         speakingLang: "English", 
-        translateLang: "Spanish", 
+        translatedLang: "Hindi", 
         tone: "Professional" 
       });
       this.settings = prefs;
@@ -154,7 +158,7 @@ class UIHost {
     if (!this.shadow) return;
     const langSub = this.shadow.querySelector("#lang-label");
     const toneSub = this.shadow.querySelector("#tone-label");
-    if (langSub) langSub.textContent = `(${this.settings.translateLang})`;
+    if (langSub) langSub.textContent = `(${this.settings.translatedLang})`;
     if (toneSub) toneSub.textContent = `(${this.settings.tone})`;
   }
 
@@ -183,6 +187,25 @@ class UIHost {
     
     document.body.appendChild(this.container);
     this._bindElements();
+    this._initStorageListener();
+  }
+
+  _initStorageListener() {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'sync') {
+        let changed = false;
+        for (let [key, { newValue }] of Object.entries(changes)) {
+          if (this.settings.hasOwnProperty(key)) {
+            this.settings[key] = newValue;
+            changed = true;
+          }
+        }
+        if (changed) {
+          this._updateSettingsUI();
+          this._updateDialogValues();
+        }
+      }
+    });
   }
 
   _injectFonts() {
@@ -227,8 +250,9 @@ class UIHost {
           justify-content: center;
           pointer-events: auto;
           transition: all 0.25s cubic-bezier(0.2, 1, 0.3, 1);
-          z-index: 10000;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+          z-index: 2147483647;
+          box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+          background: #030712;
         }
 
         .voca-logo.visible { display: flex; }
@@ -265,7 +289,7 @@ class UIHost {
           padding: 8px;
           box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.1);
           pointer-events: auto;
-          z-index: 1001;
+          z-index: 2147483647;
           animation: barIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
           position: fixed;
           width: max-content;
@@ -340,7 +364,7 @@ class UIHost {
           border-radius: 12px;
           padding: 14px;
           box-shadow: 0 15px 50px rgba(0,0,0,0.9);
-          z-index: 10005;
+          z-index: 2147483647;
           position: fixed;
           pointer-events: auto;
           gap: 12px;
@@ -369,7 +393,7 @@ class UIHost {
           border-radius: 16px;
           padding: 12px;
           box-shadow: 0 12px 50px rgba(0,0,0,0.8);
-          z-index: 10002;
+          z-index: 2147483647;
           position: fixed;
           pointer-events: auto;
           gap: 8px;
@@ -384,6 +408,16 @@ class UIHost {
         .box-label.action {
           color: #4caf50;
           font-weight: 600;
+        }
+
+        /* Hide original text for replies as requested */
+        .response-box.mode-reply .box-label.original,
+        .response-box.mode-reply #original-text {
+          display: none !important;
+        }
+        
+        .response-box.mode-reply #action-label {
+          margin-top: 5px !important;
         }
 
         .box-content {
@@ -438,6 +472,53 @@ class UIHost {
           box-shadow: 0 0 15px rgba(255, 255, 255, 0.05);
         }
         .action-btn:active { transform: scale(0.96); }
+
+        .upgrade-dialog {
+          position: fixed;
+          display: none;
+          flex-direction: column;
+          align-items: center;
+          width: 280px;
+          background: #030712;
+          backdrop-filter: blur(30px);
+          -webkit-backdrop-filter: blur(30px);
+          border: 1px solid rgba(59, 130, 246, 0.3);
+          border-radius: 24px;
+          padding: 32px;
+          z-index: 2147483647;
+          box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8), 0 0 30px rgba(59, 130, 246, 0.1);
+          text-align: center;
+          pointer-events: auto;
+          animation: barIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .upgrade-dialog.visible { display: flex; }
+        .upgrade-icon { 
+          font-size: 36px;
+          margin-bottom: 12px;
+          color: #a78bfa;
+        }
+        .upgrade-title { font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 8px; font-family: 'Outfit', sans-serif; }
+        .upgrade-text { font-size: 14px; color: #9ca3af; line-height: 1.5; margin-bottom: 24px; }
+        .upgrade-btn {
+          width: 100%;
+          padding: 12px;
+          background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+          border: none;
+          border-radius: 12px;
+          color: white;
+          font-weight: 600;
+          cursor: pointer;
+          font-size: 14px;
+          transition: transform 0.2s;
+        }
+        .upgrade-btn:hover { transform: scale(1.02); }
+        .upgrade-close {
+          margin-top: 14px;
+          font-size: 12px;
+          color: rgba(255, 255, 255, 0.4);
+          cursor: pointer;
+          text-decoration: underline;
+        }
         
         .action-btn.accent {
           background: rgba(173, 198, 255, 0.15);
@@ -471,7 +552,7 @@ class UIHost {
           justify-content: center;
           cursor: pointer;
           box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-          z-index: 10001;
+          z-index: 2147483647;
           transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
           opacity: 0;
           transform: scale(0.8);
@@ -518,6 +599,70 @@ class UIHost {
           display: flex;
           align-items: center;
         }
+
+        .feedback-dialog {
+          position: fixed;
+          display: none;
+          flex-direction: column;
+          width: 320px;
+          background: rgba(15, 23, 42, 0.95);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 24px;
+          padding: 28px;
+          z-index: 2147483647;
+          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+          text-align: center;
+          pointer-events: auto;
+          animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp {
+          from { transform: translateY(20px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .feedback-dialog.visible { display: flex; }
+        .feedback-stars { display: flex; justify-content: center; gap: 10px; margin: 20px 0; }
+        .star { font-size: 32px; cursor: pointer; color: #334155; transition: all 0.2s; }
+        .star:hover { transform: scale(1.15); }
+        .star.active { color: #fbbf24; text-shadow: 0 0 10px rgba(251, 191, 36, 0.4); }
+        .feedback-textarea {
+          width: 100%;
+          background: rgba(0, 0, 0, 0.2);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 12px;
+          color: white;
+          padding: 12px;
+          font-size: 14px;
+          font-family: inherit;
+          resize: none;
+          margin-bottom: 20px;
+          box-sizing: border-box;
+          outline: none;
+          transition: border-color 0.2s;
+        }
+        .feedback-textarea:focus { border-color: #3b82f6; }
+        .feedback-submit {
+          width: 100%;
+          padding: 14px;
+          background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+          border: none;
+          border-radius: 12px;
+          color: white;
+          font-weight: 700;
+          cursor: pointer;
+          font-size: 15px;
+          transition: all 0.2s;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .feedback-submit:hover { transform: translateY(-1px); box-shadow: 0 10px 15px -3px rgba(59, 130, 246, 0.4); }
+        .feedback-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+        .feedback-title { font-size: 1.25rem; font-weight: 700; color: #fff; margin-bottom: 8px; }
+        .feedback-subtitle { font-size: 0.875rem; color: #94a3b8; line-height: 1.5; }
+
+        .feedback-submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+        .feedback-submit:active { transform: translateY(0); }
+        .feedback-submit:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .loading-dots:after {
           content: '.';
@@ -572,7 +717,7 @@ class UIHost {
             <span class="credit-cost">1 credit</span>
           </div>
           <div class="btn-wrapper">
-            <button class="action-btn" id="btn-translate">Translate <span class="subtext" id="lang-label">(Spanish)</span></button>
+            <button class="action-btn" id="btn-translate">Translate <span class="subtext" id="lang-label">(Hindi)</span></button>
             <span class="credit-cost">1 credit</span>
           </div>
           <div id="status-box" class="status-container" style="display:none; align-self: center; height: 32px;">
@@ -1561,7 +1706,29 @@ class UIHost {
           <button id="btn-copy-res" class="box-btn btn-cancel">Copy</button>
           <button id="btn-cancel-res" class="box-btn btn-cancel">Close</button>
         </div>
-
+      </div>
+      <div class="upgrade-dialog" id="upgrade-dialog">
+        <div class="upgrade-icon">⚡</div>
+        <div class="upgrade-title">Credits Exhausted</div>
+        <div class="upgrade-text">Buy credits to continue using Voca AI features.</div>
+        <button class="upgrade-btn" id="btn-upgrade-now">Buy Credits Now</button>
+        <div class="upgrade-close" id="btn-upgrade-close">Maybe later</div>
+      </div>
+      
+      <div id="feedback-dialog" class="feedback-dialog">
+        <div style="font-size: 32px; margin-bottom: 12px;">✨</div>
+        <div class="feedback-title">Enjoying Voca AI?</div>
+        <div class="feedback-subtitle">Your feedback helps us improve. How would you rate your experience?</div>
+        <div class="feedback-stars" id="feedback-stars">
+          <span class="star" data-val="1">★</span>
+          <span class="star" data-val="2">★</span>
+          <span class="star" data-val="3">★</span>
+          <span class="star" data-val="4">★</span>
+          <span class="star" data-val="5">★</span>
+        </div>
+        <textarea id="feedback-comment" class="feedback-textarea" placeholder="Tell us more... (optional)" rows="3"></textarea>
+        <button id="submit-feedback-btn" class="feedback-submit">Submit Feedback</button>
+        <div id="feedback-close" class="upgrade-close" style="margin-top: 12px;">Maybe later</div>
       </div>
     `;
   }
@@ -1574,6 +1741,7 @@ class UIHost {
     this.responseBox = this.shadow.getElementById("response-box");
     this.status = this.shadow.getElementById("status-text");
     this.statusBox = this.shadow.getElementById("status-box");
+    this.upgradeDialog = this.shadow.getElementById("upgrade-dialog");
     
     this.logo.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1590,18 +1758,19 @@ class UIHost {
       this.refresh();
     });
 
-    // Instant Auto-Save
     const selects = ["sel-speaking", "sel-translate", "sel-tone"];
     selects.forEach(id => {
       const el = this.shadow.getElementById(id);
       if (el) {
-        el.addEventListener("change", async (e) => {
+        const handler = async (e) => {
           const key = id.split("-")[1] === "speaking" ? "speakingLang" : 
-                      id.split("-")[1] === "translate" ? "translateLang" : "tone";
+                      id.split("-")[1] === "translate" ? "translatedLang" : "tone";
           this.settings[key] = e.target.value;
           await chrome.storage.sync.set({ [key]: e.target.value });
           this._updateSettingsUI();
-        });
+        };
+        el.addEventListener("change", handler);
+        el.addEventListener("input", handler);
       }
     });
 
@@ -1662,6 +1831,16 @@ class UIHost {
       }, 2000);
     });
 
+    this.shadow.getElementById("btn-upgrade-now").addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "voca:open-pricing" });
+      this.isUpgradeVisible = false;
+      this.refresh();
+    });
+
+    this.shadow.getElementById("btn-upgrade-close").addEventListener("click", () => {
+      this.isUpgradeVisible = false;
+      this.refresh();
+    });
 
     this.shadow.getElementById("btn-reply").addEventListener("click", (e) => { e.stopPropagation(); this.trigger("reply"); });
     this.shadow.getElementById("btn-fix").addEventListener("click", (e) => { e.stopPropagation(); this.trigger("grammar"); });
@@ -1682,14 +1861,41 @@ class UIHost {
       if (msg.type === "voca:setting") {
         this.settings[msg.key] = msg.value;
         this._updateSettingsUI();
+      } else if (msg.type === "voca:open-feedback") {
+        this.isFeedbackVisible = true;
+        this.refresh();
       }
+    });
+
+    // Feedback Dialog Logic
+    const stars = this.shadow.querySelectorAll(".feedback-stars .star");
+    stars.forEach(star => {
+      star.addEventListener("click", (e) => {
+        const val = parseInt(e.target.dataset.val);
+        this.selectedRating = val;
+        stars.forEach(s => {
+          s.classList.toggle("active", parseInt(s.dataset.val) <= val);
+        });
+      });
+    });
+
+    this.shadow.getElementById("feedback-close").addEventListener("click", () => {
+      this.isFeedbackVisible = false;
+      this.refresh();
+    });
+
+    this.shadow.getElementById("submit-feedback-btn").addEventListener("click", () => {
+      this._submitFeedback();
     });
   }
 
   _updateDialogValues() {
-    this.shadow.getElementById("sel-speaking").value = this.settings.speakingLang;
-    this.shadow.getElementById("sel-translate").value = this.settings.translateLang;
-    this.shadow.getElementById("sel-tone").value = this.settings.tone;
+    const s = this.shadow.getElementById("sel-speaking");
+    const t = this.shadow.getElementById("sel-translate");
+    const o = this.shadow.getElementById("sel-tone");
+    if (s) s.value = this.settings.speakingLang;
+    if (t) t.value = this.settings.translatedLang;
+    if (o) o.value = this.settings.tone;
   }
 
   showSelectionLogo(selection) {
@@ -1745,11 +1951,13 @@ class UIHost {
             range.insertNode(document.createTextNode(res.result));
             window.getSelection().removeAllRanges();
           } catch(e) {
-            console.error("[Voca] Could not replace selection inline:", e);
+            // console.warn("[Voca] Could not replace selection inline:", e);
           }
         }
+      } else if (res?.upgradeRequired) {
+        this.isUpgradeVisible = true;
       } else if (res?.error) {
-        console.error("[Voca] Translation error:", res.error);
+        // Silenced as per user request
       }
       this.refresh();
     });
@@ -1809,6 +2017,25 @@ class UIHost {
       } else if (this.responseBox) {
         this.responseBox.classList.remove("visible");
       }
+      
+      // Upgrade dialog handling when inactive field
+      if (this.upgradeDialog) {
+        if (this.isUpgradeVisible && this.lastSelectionRect) {
+          this.upgradeDialog.classList.add("visible");
+          const targetRect = this.lastSelectionRect;
+          const dialogHeight = this.upgradeDialog.offsetHeight || 260;
+          if (targetRect.top < dialogHeight + 60) {
+            this.upgradeDialog.style.top = `${targetRect.bottom + 15}px`;
+            this.upgradeDialog.style.bottom = 'auto';
+          } else {
+            this.upgradeDialog.style.bottom = `${window.innerHeight - targetRect.top + 15}px`;
+            this.upgradeDialog.style.top = 'auto';
+          }
+          this.upgradeDialog.style.left = `${Math.max(20, Math.min(targetRect.left, window.innerWidth - 300))}px`;
+        } else {
+          this.upgradeDialog.classList.remove("visible");
+        }
+      }
       return;
     }
     
@@ -1841,9 +2068,15 @@ class UIHost {
     
     if (this.inflight) {
       this.logo.classList.add("breathing");
-      this.logo.classList.add("visible");
     } else {
       this.logo.classList.remove("breathing");
+    }
+    
+    const shouldShowLogo = (isFocused || this.inflight) && !this.expanded && !this.isResponseVisible && !this.isUpgradeVisible;
+    if (shouldShowLogo) {
+      this.logo.classList.add("visible");
+    } else {
+      this.logo.classList.remove("visible");
     }
     
     if (shouldShowPanel) {
@@ -1856,103 +2089,144 @@ class UIHost {
       this.panel.style.top = `${Math.max(5, panelTop)}px`;
       this.panel.style.left = `${Math.max(5, panelLeft)}px`;
       this.panel.classList.add("visible");
+      
+      // Position Settings Dialog
+      const settingsDialog = this.shadow.getElementById("dialog");
+      if (settingsDialog) {
+        if (this.isDialogVisible) {
+          settingsDialog.classList.add("visible");
+          const targetRect = this.activeField ? this.activeField.el.getBoundingClientRect() : (this.lastSelectionRect || { top: logoTop, left: logoLeft, bottom: logoTop + 24, width: 0 });
+          const dialogHeight = settingsDialog.offsetHeight || 220;
+          if (targetRect.top < dialogHeight + 50) {
+            settingsDialog.style.top = `${targetRect.bottom + 10}px`;
+            settingsDialog.style.bottom = 'auto';
+          } else {
+            settingsDialog.style.bottom = `${window.innerHeight - targetRect.top + 10}px`;
+            settingsDialog.style.top = 'auto';
+          }
+          settingsDialog.style.left = `${Math.max(10, Math.min(targetRect.left, window.innerWidth - 250))}px`;
+        } else {
+          settingsDialog.classList.remove("visible");
+        }
+      }
 
       const btns = this.shadow.querySelectorAll(".action-btn");
       btns.forEach(b => b.disabled = this.inflight);
+    }
 
-      if (this.isDialogVisible && this.dialog) {
-        this.dialog.classList.add("visible");
-        const dialogHeight = this.dialog.offsetHeight || 220;
-        const spaceAbove = panelTop;
-        
-        if (spaceAbove < dialogHeight + 20) {
-          // Show below if not enough space above
-          this.dialog.style.top = `${panelTop + panelHeight + 10}px`;
-          this.dialog.style.bottom = 'auto';
-        } else {
-          // Show above
-          this.dialog.style.bottom = `${window.innerHeight - panelTop + 5}px`;
-          this.dialog.style.top = 'auto';
-        }
-        this.dialog.style.left = `${Math.max(5, panelLeft)}px`;
-      } else if (this.dialog) {
-        this.dialog.classList.remove("visible");
-      }
-
-      if (this.isResponseVisible && this.responseBox) {
+    // Position Response Box (for input field actions)
+    if (this.responseBox) {
+      if (this.isResponseVisible) {
         this.responseBox.classList.add("visible");
-        const respHeight = this.responseBox.offsetHeight || 280;
-        const spaceAbove = panelTop;
-
-        if (spaceAbove < respHeight + 20) {
-          // Show below
-          this.responseBox.style.top = `${panelTop + panelHeight + 10}px`;
+        const respHeight = this.responseBox.offsetHeight || 250;
+        if (rect.top < respHeight + 50) {
+          this.responseBox.style.top = `${rect.bottom + 10}px`;
           this.responseBox.style.bottom = 'auto';
         } else {
-          // Show above
-          this.responseBox.style.bottom = `${window.innerHeight - panelTop + 10}px`;
+          this.responseBox.style.bottom = `${window.innerHeight - rect.top + 10}px`;
           this.responseBox.style.top = 'auto';
         }
-        this.responseBox.style.left = `${Math.max(5, panelLeft)}px`;
-        
-        if (this.isReadOnlyResponse) this.responseBox.classList.add("read-only");
-        else this.responseBox.classList.remove("read-only");
-      } else if (this.responseBox) {
-        this.responseBox.classList.remove("visible");
-      }
-    } else {
-      const hasContent = this.activeField.getValue().trim().length > 0;
-      
-      const btnFix = this.shadow.getElementById("btn-fix");
-      const btnImprove = this.shadow.getElementById("btn-improve");
-      const btnTranslate = this.shadow.getElementById("btn-translate");
-      const btnReply = this.shadow.getElementById("btn-reply");
-
-      // Update button states - Logic fix: when input is empty, only reply is active
-      if (btnFix) btnFix.disabled = this.inflight || !hasContent;
-      if (btnImprove) btnImprove.disabled = this.inflight || !hasContent;
-      if (btnTranslate) btnTranslate.disabled = this.inflight || !hasContent;
-      // "Write Reply" is special: 
-      // - If input has content, it acts on that content.
-      // - If input is empty, it relies on conversation history.
-      // Requirement: "when inout is empty then only write reply should be active"
-      if (btnReply) {
-        btnReply.disabled = this.inflight;
-        // Make it visually pop if it's the "only" active one
-        if (!hasContent) btnReply.classList.add("pulse-subtle");
-        else btnReply.classList.remove("pulse-subtle");
-      }
-
-      const shouldShowLogo = (isFocused || this.inflight) && !this.expanded && !this.isResponseVisible;
-      if (shouldShowLogo) {
-        this.logo.classList.add("visible");
+        this.responseBox.style.left = `${Math.max(10, Math.min(rect.left, window.innerWidth - 320))}px`;
       } else {
-        this.logo.classList.remove("visible");
-      }
-      this.panel.classList.remove("visible");
-      if (this.dialog) this.dialog.classList.remove("visible");
-      
-      if (this.isResponseVisible && this.responseBox) {
-        this.responseBox.classList.add("visible");
-        const respHeight = this.responseBox.offsetHeight || 280;
-        
-        if (logoTop < respHeight + 20) {
-          this.responseBox.style.top = `${logoTop + 40}px`;
-          this.responseBox.style.bottom = 'auto';
-        } else {
-          this.responseBox.style.bottom = `${window.innerHeight - logoTop + 10}px`;
-          this.responseBox.style.top = 'auto';
-        }
-        this.responseBox.style.left = `${Math.max(5, logoLeft)}px`;
-        
-        if (this.isReadOnlyResponse) this.responseBox.classList.add("read-only");
-        else this.responseBox.classList.remove("read-only");
-      } else if (this.responseBox) {
         this.responseBox.classList.remove("visible");
+      }
+    }
+    
+    // Position Upgrade Dialog (Smart positioning like response box)
+    if (this.upgradeDialog) {
+      if (this.isUpgradeVisible) {
+        this.upgradeDialog.classList.add("visible");
+        const targetRect = this.activeField ? this.activeField.el.getBoundingClientRect() : this.lastSelectionRect;
+        if (targetRect) {
+          const dialogHeight = this.upgradeDialog.offsetHeight || 260;
+          if (targetRect.top < dialogHeight + 60) {
+            this.upgradeDialog.style.top = `${targetRect.bottom + 15}px`;
+            this.upgradeDialog.style.bottom = 'auto';
+          } else {
+            this.upgradeDialog.style.bottom = `${window.innerHeight - targetRect.top + 15}px`;
+            this.upgradeDialog.style.top = 'auto';
+          }
+          this.upgradeDialog.style.left = `${Math.max(20, Math.min(targetRect.left, window.innerWidth - 300))}px`;
+        }
+      } else {
+        this.upgradeDialog.classList.remove("visible");
+      }
+    }
+
+    // Position Feedback Dialog
+    const feedbackDialog = this.shadow.getElementById("feedback-dialog");
+    if (feedbackDialog) {
+      if (this.isFeedbackVisible) {
+        feedbackDialog.classList.add("visible");
+        const targetRect = this.activeField ? this.activeField.el.getBoundingClientRect() : (this.lastSelectionRect || { top: window.innerHeight/2, left: window.innerWidth/2, bottom: window.innerHeight/2 + 10, width: 0 });
+        const dialogHeight = feedbackDialog.offsetHeight || 300;
+        if (targetRect.top < dialogHeight + 50) {
+          feedbackDialog.style.top = `${targetRect.bottom + 10}px`;
+          feedbackDialog.style.bottom = 'auto';
+        } else {
+          feedbackDialog.style.bottom = `${window.innerHeight - targetRect.top + 10}px`;
+          feedbackDialog.style.top = 'auto';
+        }
+        feedbackDialog.style.left = `${Math.max(10, Math.min(targetRect.left, window.innerWidth - 300))}px`;
+      } else {
+        feedbackDialog.classList.remove("visible");
       }
     }
   }
 
+  _submitFeedback() {
+    if (this.selectedRating === 0) {
+      this._showStatus("Please select a rating", 2000);
+      return;
+    }
+
+    const comment = this.shadow.getElementById("feedback-comment").value.trim();
+    const btn = this.shadow.getElementById("submit-feedback-btn");
+    btn.disabled = true;
+    btn.textContent = "Sending...";
+
+    this._safeSendMessage({
+      type: "voca:submit-feedback",
+      data: {
+        rating: this.selectedRating,
+        comment: comment
+      }
+    }, (res) => {
+      btn.disabled = false;
+      btn.textContent = "Submit Feedback";
+      
+      if (res?.success) {
+        this._showStatus("Feedback sent! Thank you ✨", 3000);
+        this.isFeedbackVisible = false;
+        chrome.storage.local.set({ feedbackSubmitted: true });
+        this.refresh();
+      } else {
+        this._showStatus(res?.error || "Failed to send feedback", 3000);
+      }
+    });
+  }
+
+  async _checkFeedbackPeriodically() {
+    try {
+      const data = await chrome.storage.local.get(["feedbackSubmitted", "lastFeedbackPrompt"]);
+      if (data.feedbackSubmitted) return;
+
+      const now = Date.now();
+      const lastPrompt = data.lastFeedbackPrompt || 0;
+      const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+
+      if (now - lastPrompt > SEVEN_DAYS) {
+        // Wait a bit after load to not be too intrusive
+        setTimeout(() => {
+          this.isFeedbackVisible = true;
+          this.refresh();
+          chrome.storage.local.set({ lastFeedbackPrompt: now });
+        }, 5000);
+      }
+    } catch (e) {
+      console.warn("[Voca] Feedback period check failed:", e);
+    }
+  }
 
   async trigger(mode) {
     if (this.inflight) return;
@@ -1981,6 +2255,11 @@ class UIHost {
     this.isResponseVisible = false;
     this.isReadOnlyResponse = false;
     this.currentAction = mode;
+
+    // Reset mode-reply class
+    if (this.responseBox) {
+      this.responseBox.classList.toggle("mode-reply", mode === "reply");
+    }
     
     // Set loading state on the button
     const btnId = mode === "grammar" ? "btn-fix" : mode === "improve" ? "btn-improve" : mode === "translate" ? "btn-translate" : "btn-reply";
@@ -1998,10 +2277,13 @@ class UIHost {
     this.refresh();
 
     const requestType = mode === "reply" && messages.length > 0 ? "voca:auto-reply" : "voca:request";
+    const targetLang = (mode === "translate" || mode === "pro-translate") ? this.settings.translatedLang : this.settings.speakingLang;
     const payload = requestType === "voca:auto-reply" 
       ? { type: requestType, messages, tone: this.settings.tone }
-      : { type: requestType, text, mode, targetLang: this.settings.speakingLang, tone: this.settings.tone };
+      : { type: requestType, text, mode, targetLang, tone: this.settings.tone };
 
+    this.responseBox.classList.toggle("mode-reply", mode === "reply");
+    
     this._safeSendMessage(payload, (res) => {
       console.log('[Voca] AI response received:', res);
       this.inflight = false;
@@ -2030,12 +2312,19 @@ class UIHost {
         const actionLabel = this.shadow.getElementById("action-label");
         if (actionLabel) actionLabel.textContent = actionMap[mode] || "AI Response";
 
-        this.shadow.getElementById("original-text").textContent = text || (messages && messages.length > 0 ? messages[messages.length-1].text : "");
+        // Set Original Text (fix: use .text or .content based on scraper output)
+        const lastMsg = messages && messages.length > 0 ? messages[messages.length - 1] : null;
+        const originalVal = text || (lastMsg ? (lastMsg.text || lastMsg.content) : "");
+        
+        this.shadow.getElementById("original-text").textContent = originalVal;
         this.shadow.getElementById("result-text").textContent = res.result;
+      } else if (res?.upgradeRequired) {
+        this.isUpgradeVisible = true;
+        this.refresh();
+        return;
       } else if (res?.error) {
-        console.error('[Voca] AI Error:', res.error);
+        // Silenced as per user request
         this._showStatus(res.error, 5000);
-        // Don't hide status box immediately if it's an error
       } else {
         if (this.statusBox) this.statusBox.style.display = "none";
       }
@@ -2055,21 +2344,52 @@ class UIHost {
   }
 
   _scrapeWhatsAppContext() {
-    // WhatsApp specific selectors for message bubbles
-    const bubbles = document.querySelectorAll('.message-in, .message-out, [data-testid="msg-container"]');
-    if (bubbles.length === 0) return [];
+    // WhatsApp Web specific selectors for message bubbles
+    // They frequently update their DOM, so we use multiple fallback selectors
+    const bubbles = document.querySelectorAll(
+      '.message-in, .message-out, [data-testid="msg-container"], .msg-container'
+    );
     
-    // Get last 10 messages for better context
-    const msgs = Array.from(bubbles).slice(-10).map(b => {
-      const isMe = b.classList.contains("message-out"); 
+    if (bubbles.length === 0) {
+      // Fallback for newer React-based WhatsApp Web layouts
+      const altBubbles = document.querySelectorAll('div[role="row"]');
+      if (altBubbles.length > 0) {
+        return Array.from(altBubbles).slice(-5).map(b => {
+          const isMe = b.querySelector('.message-out') !== null;
+          const textNode = b.querySelector('span.selectable-text') || b.querySelector('span[selectable="true"]');
+          return {
+            sender: isMe ? "Me" : "Them",
+            text: textNode ? textNode.innerText.trim() : ""
+          };
+        }).filter(m => m.text.length > 0);
+      }
+      return [];
+    }
+    
+    // Get last 5 messages for better context
+    const msgs = Array.from(bubbles).slice(-5).map(b => {
+      // Improved sender detection for WhatsApp Web
+      const isMe = b.classList.contains("message-out") || 
+                   b.querySelector('.message-out') !== null || 
+                   b.closest('.message-out') !== null ||
+                   b.innerHTML.includes('message-out');
+      
+      // Look for the actual text inside the bubble with expanded selectors
       const textNode = b.querySelector(".copyable-text span") || 
-                       b.querySelector("span[selectable]") || 
+                       b.querySelector("span.selectable-text") || 
                        b.querySelector(".selectable-text") || 
+                       b.querySelector("span[selectable]") ||
                        b.querySelector('[data-testid="quoted-msg-text"]') ||
-                       b;
+                       b.querySelector('.message-text') ||
+                       b.querySelector('span'); // Final fallback
+
       const text = textNode ? (textNode.innerText || textNode.textContent || "").trim() : "";
-      return { role: isMe ? "assistant" : "user", content: text };
-    }).filter(m => m.content && m.content.length > 1);
+      
+      return { 
+        sender: isMe ? "Me" : "Them", 
+        text: text 
+      };
+    }).filter(m => m.text && m.text.length >= 1);
     
     return msgs;
   }

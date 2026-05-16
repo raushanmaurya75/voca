@@ -105,7 +105,7 @@ async function getAuthToken() {
 async function callVocaAI(payload) {
   const token = await getAuthToken();
   if (!token) {
-    console.error('[Voca] callVocaAI: Authentication failed (token is null)');
+    // console.warn('[Voca] callVocaAI: Authentication failed (token is null)');
     throw new Error('Not authenticated');
   }
   console.log('[Voca] callVocaAI: Authenticated successfully, proceeding with request');
@@ -131,7 +131,7 @@ async function callVocaAI(payload) {
       data = await res.json();
     } else {
       const text = await res.text();
-      console.error(`[Voca] Received non-JSON response from worker (Status: ${res.status}):`, text.substring(0, 500));
+      // console.warn(`[Voca] Received non-JSON response from worker (Status: ${res.status}):`, text.substring(0, 500));
       throw new Error(`Worker returned invalid response (Status: ${res.status}). This often means a configuration error or WAF block.`);
     }
 
@@ -144,6 +144,14 @@ async function callVocaAI(payload) {
       }
       throw error;
     }
+
+    // Store usage in local storage for real-time sync with popup
+    await chrome.storage.local.set({
+      vocaUsage: {
+        ...data, // Include paid, free, plan, and all backend metadata
+        lastUpdated: Date.now()
+      }
+    });
 
     return {
       result: data.result,
@@ -182,7 +190,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const isRateLimit = err.message?.includes('Rate limit');
         const isLimitReached = err.upgradeRequired || err.message?.includes('tier limit reached');
 
-        console.error('[Voca] AI request failed:', err);
+        // Silenced as per user request
+        // console.error('[Voca] AI request failed:', err);
 
         if (isLimitReached) {
           sendResponse({
@@ -222,7 +231,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch(err => {
         const isLimitReached = err.upgradeRequired || err.message?.includes('tier limit reached');
         const isAuthError = err.message?.includes('Not authenticated') || err.message?.includes('token');
-        console.error('[Voca] Auto-reply failed:', err);
+        // Silenced as per user request
+        // console.error('[Voca] Auto-reply failed:', err);
 
         if (isLimitReached) {
           sendResponse({
@@ -292,13 +302,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
-
-  if (msg.type === 'voca:open-upgrade') {
-    // Open pricing/upgrade page
-    const upgradeUrl = `${SUPABASE_URL}/pricing`; // You'll need to create this page
-    chrome.tabs.create({ url: 'https://voca.app/pricing' }).then(() => {
+  if (msg.type === 'voca:open-upgrade' || msg.type === 'voca:open-pricing') {
+    const pricingUrl = chrome.runtime.getURL('pricing.html');
+    chrome.tabs.create({ url: pricingUrl }).then(() => {
       sendResponse({ success: true });
     });
+    return true;
+  }
+
+  if (msg.type === 'voca:submit-feedback') {
+    (async () => {
+      try {
+        const token = await getAuthToken();
+        if (!token) {
+          sendResponse({ error: 'Please log in to submit feedback' });
+          return;
+        }
+
+        const response = await fetch(`${WORKER_URL}/v1/feedback`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(msg.data)
+        });
+
+        const result = await response.json();
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ error: 'Network error submitting feedback' });
+      }
+    })();
     return true;
   }
 

@@ -1,0 +1,43 @@
+﻿
+ Γ¢à∩╕Å wrangler 3.114.17 (update available 4.92.0)
+-----------------------------------------------
+
+≡ƒîÇ Executing on remote database voca-db (99f24245-98ca-4ac4-9384-d3e9862777a6):
+≡ƒîÇ To execute on your local development database, remove the --remote flag from your wrangler command.
+≡ƒÜú Executed 1 command in 0.14ms
+[
+  {
+    "results": [
+      {
+        "name": "usage_tracking",
+        "sql": "CREATE TABLE usage_tracking (\n  userId TEXT NOT NULL,\n  month TEXT NOT NULL,\n  messagesUsed INTEGER DEFAULT 0,\n  translationsUsed INTEGER DEFAULT 0,\n  lastSyncCount INTEGER DEFAULT 0,\n  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, minute_count INTEGER DEFAULT 0, last_minute INTEGER DEFAULT 0,\n  PRIMARY KEY (userId, month)\n)"
+      },
+      {
+        "name": "user_credits",
+        "sql": "CREATE TABLE user_credits (\n      userId TEXT PRIMARY KEY,\n      balance REAL DEFAULT 0,\n      totalPurchased REAL DEFAULT 0,\n      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP\n    )"
+      },
+      {
+        "name": "payments",
+        "sql": "CREATE TABLE payments (\n  id TEXT PRIMARY KEY,               -- Razorpay order_id\n  userId TEXT NOT NULL,\n  plan TEXT NOT NULL,                -- 'pro' or 'premium'\n  amount INTEGER NOT NULL,           -- Amount in paise (e.g., 80000 for $8)\n  currency TEXT DEFAULT 'USD',\n  credits INTEGER NOT NULL,          -- Credits awarded\n  status TEXT DEFAULT 'created',     -- created, paid, failed\n  razorpay_payment_id TEXT,          -- Filled after successful payment\n  razorpay_signature TEXT,           -- Filled after successful payment\n  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,\n  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP\n)"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "APAC",
+      "served_by_colo": "SIN",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.1401
+      },
+      "duration": 0.1401,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 61440,
+      "rows_read": 13,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

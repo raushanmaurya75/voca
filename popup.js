@@ -6,7 +6,6 @@ const WORKER_URL = 'https://voca-backend.tivitji.workers.dev';
 // DOM Elements
 const statusEl    = document.getElementById('status');
 const statusText  = document.getElementById('status-text');
-const speakingLang = document.getElementById('speaking-lang');
 const planBadge = document.getElementById('plan-badge');
 const currentPlan = document.getElementById('current-plan');
 const remainingDays = document.getElementById('remaining-days');
@@ -17,6 +16,8 @@ const translationsBar = document.getElementById('translations-bar');
 const userInfo = document.getElementById('user-info');
 const userEmail = document.getElementById('user-email');
 const btnLogout = document.getElementById('btn-logout');
+const btnUpgrade = document.getElementById('btn-upgrade');
+const btnFeedback = document.getElementById('btn-feedback');
 
 // ─── Auth Check ─────────────────────────────────────────────────────────────
 async function checkAuth() {
@@ -90,7 +91,7 @@ function displaySubscriptionInfo(data) {
   };
   
   const free = data.free || { 
-    used: (data.messagesUsed || 0), 
+    used: (data.messagesUsed || 0) + (data.translationsUsed || 0), 
     total: data.messageLimit || 200 
   };
 
@@ -112,37 +113,55 @@ function displaySubscriptionInfo(data) {
     currentPlan.style.color = planInfo.color;
   }
   
+  // Logic to separate paid and free credits accurately
+  const MAX_FREE_LIMIT = 200;
+  
+  let fUsed = free.used;
+  let fTotal = free.total;
+  let pUsed = paid.used;
+  let pTotal = paid.total;
+
+  // If worker hasn't split the data or legacy format is detected
+  if (!paid.total || fTotal > MAX_FREE_LIMIT) {
+    const rawTotalUsed = (data.messagesUsed || 0) + (data.translationsUsed || 0);
+    const rawPlanLimit = data.messageLimit || 200;
+    const rawPurchasedTotal = data.paid_credits || 0;
+    const rawPurchasedUsed = data.paid_credits_used || 0;
+
+    // Cap Free at 200
+    fTotal = MAX_FREE_LIMIT;
+    fUsed = Math.min(rawTotalUsed, MAX_FREE_LIMIT);
+
+    // Everything else (plan overflow + purchased) goes to Paid
+    const planOverflowUsed = Math.max(0, rawTotalUsed - MAX_FREE_LIMIT);
+    const planOverflowLimit = Math.max(0, rawPlanLimit - MAX_FREE_LIMIT);
+
+    pUsed = planOverflowUsed + rawPurchasedUsed;
+    pTotal = planOverflowLimit + rawPurchasedTotal;
+  }
+
+  // Final check: ensure pUsed doesn't exceed pTotal in display if possible
+  // but keep actual numbers for transparency
+
   // Update Paid Credits UI
   if (messagesUsage) {
-    const paidBalance = paid.balance ?? 0;
-    const paidTotal = paid.total ?? 0;
-    if (paidTotal > 0) {
-      messagesUsage.textContent = `${paidBalance} / ${paidTotal} left`;
-    } else {
-      messagesUsage.textContent = `0 / 0 credits`;
+    messagesUsage.textContent = `${pUsed} / ${pTotal}`;
+    if (messagesBar) {
+      const msgPercent = pTotal > 0 ? (pUsed / pTotal) * 100 : 0;
+      messagesBar.style.width = `${Math.min(msgPercent, 100)}%`;
+      messagesBar.style.background = msgPercent > 90 ? '#ef4444' : 'linear-gradient(90deg, #60a5fa, #3b82f6)';
     }
-  }
-  if (messagesBar) {
-    const paidUsed = paid.total - paid.balance;
-    const msgPercent = paid.total > 0 ? (paidUsed / paid.total) * 100 : 0;
-    messagesBar.style.width = `${Math.min(msgPercent, 100)}%`;
-    messagesBar.style.background = msgPercent > 90 ? '#ef4444' : 'linear-gradient(90deg, #60a5fa, #3b82f6)';
   }
 
   // Update Free Credits UI
   if (translationsUsage) {
-    const freeRemaining = Math.max(0, free.total - free.used);
-    translationsUsage.textContent = `${freeRemaining} / ${free.total} left`;
+    translationsUsage.textContent = `${fUsed} / ${fTotal}`;
+    if (translationsBar) {
+      const transPercent = fTotal > 0 ? (fUsed / fTotal) * 100 : 0;
+      translationsBar.style.width = `${Math.min(transPercent, 100)}%`;
+      translationsBar.style.background = transPercent > 90 ? '#ef4444' : 'linear-gradient(90deg, #9ca3af, #6b7280)';
+    }
   }
-  if (translationsBar) {
-    const transPercent = free.total > 0 ? (free.used / free.total) * 100 : 0;
-    translationsBar.style.width = `${Math.min(transPercent, 100)}%`;
-    translationsBar.style.background = transPercent > 90 ? '#ef4444' : 'linear-gradient(90deg, #a78bfa, #7c3aed)';
-  }
-
-  // Visual cues if exhausted
-  if (messagesUsage) messagesUsage.style.color = (paid.total > 0 && paid.used >= paid.total) ? "#ef4444" : "#fff";
-  if (translationsUsage) translationsUsage.style.color = (free.total > 0 && free.used >= free.total) ? "#ef4444" : "#fff";
 
   // Always show both sections
   const pContainer = document.getElementById('paid-container');
@@ -175,26 +194,38 @@ function setStatus(state) {
   statusText.textContent = labels[state] ?? 'AI Off';
 }
 
-chrome.storage.sync.get({ speakingLang: 'English' }, (prefs) => {
-  speakingLang.value = prefs.speakingLang;
-  setStatus('ready');
+// Remove settings logic - now managed via in-page toolbar
+setStatus('ready');
+
+document.getElementById('btn-upgrade')?.addEventListener('click', async () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('pricing.html') });
 });
 
-speakingLang.addEventListener('change', () => {
-  chrome.storage.sync.set({ speakingLang: speakingLang.value });
+document.getElementById('btn-feedback')?.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]?.id) {
-      chrome.tabs.sendMessage(tabs[0].id, {
-        type: 'voca:setting',
-        key:   'speakingLang',
-        value: speakingLang.value
-      });
+      chrome.tabs.sendMessage(tabs[0].id, { type: 'voca:open-feedback' });
+      window.close();
     }
   });
 });
 
-document.getElementById('btn-upgrade')?.addEventListener('click', async () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL('pricing.html') });
+// Initialize
+document.addEventListener('DOMContentLoaded', async () => {
+  // Initial load will be triggered by checkAuth() -> loadSubscriptionInfo()
+});
+
+// Listen for storage changes to sync credits in real-time
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.vocaUsage) {
+    console.log('[Voca] Credits updated in background, refreshing popup UI...');
+    const usage = changes.vocaUsage.newValue;
+    if (usage) {
+      displaySubscriptionInfo(usage);
+    } else {
+      loadSubscriptionInfo(); 
+    }
+  }
 });
 
 btnLogout?.addEventListener('click', async () => {

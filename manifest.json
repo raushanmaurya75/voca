@@ -14,7 +14,8 @@
   "host_permissions": [
     "<all_urls>",
     "https://voca-backend.tivitji.workers.dev/*",
-    "https://*.supabase.co/*"
+    "https://*.supabase.co/*",
+    "https://api.razorpay.com/*"
   ],
 
   "content_scripts": [
